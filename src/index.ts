@@ -1,0 +1,107 @@
+// ---------------------------------------------------------------
+// FILE: src/index.ts
+// Canary — Ollama Cloud Status Monitor
+// ---------------------------------------------------------------
+
+import {
+  Client,
+  GatewayIntentBits,
+  TextChannel,
+  Message,
+} from "discord.js";
+import { pollAllModels, PollResult } from "./monitor.js";
+import { buildEmbed } from "./embed.js";
+import {
+  POLL_INTERVAL_HEALTHY,
+  POLL_INTERVAL_DEGRADED,
+  POLL_INTERVAL_DOWN,
+  DISCORD_PING_ON_RED,
+} from "./config.js";
+
+// ── Env ────────────────────────────────────────────────────────
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN!;
+const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID!;
+const OLLAMA_API_KEY = process.env.OLLAMA_API_KEY!;
+
+// Optional: persist message ID across restarts via env
+// On Railway: set STATUS_MESSAGE_ID after first run
+let statusMessageId: string | null = process.env.STATUS_MESSAGE_ID ?? null;
+
+if (!DISCORD_TOKEN || !DISCORD_CHANNEL_ID || !OLLAMA_API_KEY) {
+  throw new Error(
+    "Missing required env vars: DISCORD_TOKEN, DISCORD_CHANNEL_ID, OLLAMA_API_KEY"
+  );
+}
+
+// ── State ──────────────────────────────────────────────────────
+let lastResult: PollResult | null = null;
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+// ── Discord Client ─────────────────────────────────────────────
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+});
+
+client.once("ready", async () => {
+  console.log(`🐤 Canary is online as ${client.user?.tag}`);
+  await runPoll();
+});
+
+// ── Poll Loop ──────────────────────────────────────────────────
+async function runPoll() {
+  try {
+    const channel = await client.channels.fetch(DISCORD_CHANNEL_ID) as TextChannel;
+    if (!channel) throw new Error("Channel not found");
+
+    const previousDownSince = lastResult?.downSince ?? null;
+    const previousOverall = lastResult?.overall ?? null;
+
+    const result = await pollAllModels(OLLAMA_API_KEY, previousDownSince);
+    lastResult = result;
+
+    const embed = buildEmbed(result);
+    const wentDown = previousOverall !== "down" && result.overall === "down";
+
+    // Edit existing message or post new one
+    if (statusMessageId) {
+      try {
+        const existing = await channel.messages.fetch(statusMessageId);
+        await existing.edit({ embeds: [embed] });
+      } catch {
+        // Message was deleted — post fresh
+        statusMessageId = null;
+      }
+    }
+
+    if (!statusMessageId) {
+      const content = wentDown && DISCORD_PING_ON_RED ? "@here" : undefined;
+      const posted = await channel.send({
+        content,
+        embeds: [embed],
+      }) as Message;
+      statusMessageId = posted.id;
+      console.log(`📌 Status message ID: ${statusMessageId} — set STATUS_MESSAGE_ID in Railway env to persist across restarts`);
+    } else if (wentDown && DISCORD_PING_ON_RED) {
+      // Message already existed, send a separate @here ping
+      await channel.send("@here Ollama Cloud is down! 🔴");
+    }
+
+    console.log(`✅ Polled at ${result.checkedAt.toISOString()} — overall: ${result.overall}`);
+  } catch (err) {
+    console.error("Poll failed:", err);
+  }
+
+  // Schedule next poll based on current status
+  const interval =
+    lastResult?.overall === "down"
+      ? POLL_INTERVAL_DOWN
+      : lastResult?.overall === "degraded"
+      ? POLL_INTERVAL_DEGRADED
+      : POLL_INTERVAL_HEALTHY;
+
+  pollTimer = setTimeout(runPoll, interval);
+  console.log(`⏰ Next poll in ${interval / 60_000} min`);
+}
+
+// ── Boot ───────────────────────────────────────────────────────
+client.login(DISCORD_TOKEN);
