@@ -7,7 +7,6 @@ export const MONITORED_MODELS = [
     "kimi-k2:1t-cloud",
     "kimi-k2.5:cloud",
     "qwen3-coder-next:cloud",
-    "qwen3.5:cloud",
     "qwen3-vl:235b-cloud",
     "deepseek-v3.2:cloud",
     "glm-5:cloud",
