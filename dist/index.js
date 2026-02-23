@@ -38,7 +38,8 @@ async function runPoll() {
         const result = await pollAllModels(OLLAMA_API_KEY, previousDownSince);
         lastResult = result;
         const embed = buildEmbed(result);
-        const wentDown = previousOverall !== "down" && result.overall === "down";
+        // Only trigger @here if we KNOW it was previously up — not on first boot (null)
+        const wentDown = previousOverall !== null && previousOverall !== "down" && result.overall === "down";
         // Edit existing message or post new one
         if (statusMessageId) {
             try {

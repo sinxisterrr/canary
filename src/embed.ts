@@ -24,6 +24,17 @@ const EMBED_COLOR: Record<ModelStatus, number> = {
   down: 0xed4245,    // red
 };
 
+function formatErrorLabel(error?: string): string {
+  if (!error) return "🔴 down";
+  if (error.includes("500")) return "500 Internal Server Error";
+  if (error.includes("502")) return "502 Bad Gateway";
+  if (error.includes("404")) return "404 Not Found";
+  if (error.includes("400")) return "400 Bad Request";
+  if (error.includes("429")) return "429 Rate Limited";
+  if (error.includes("timeout")) return "⏱️ timeout";
+  return error;
+}
+
 function formatResponseTime(ms: number | null, error?: string): string {
   if (ms === null) return error ?? "timeout";
   if (ms > 10_000) return `${(ms / 1000).toFixed(1)}s ⚠️`;
@@ -52,7 +63,7 @@ export function buildEmbed(result: PollResult): EmbedBuilder {
     .map((m) => {
       const emoji = STATUS_EMOJI[m.status];
       const time = m.status === "down"
-        ? (m.error ?? "down")
+        ? formatErrorLabel(m.error)
         : formatResponseTime(m.responseMs, m.error);
       // Pad model name for alignment
       return `${emoji} \`${m.model.padEnd(30)}\` ${time}`;
