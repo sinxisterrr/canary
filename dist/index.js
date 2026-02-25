@@ -19,6 +19,7 @@ if (!DISCORD_TOKEN || !DISCORD_CHANNEL_ID || !OLLAMA_API_KEY) {
 // ── State ──────────────────────────────────────────────────────
 let lastResult = null;
 let pollTimer = null;
+let pingMessageId = null; // tracks standalone @here ping messages
 // ── Discord Client ─────────────────────────────────────────────
 const client = new Client({
     intents: [
@@ -45,16 +46,27 @@ async function runPoll() {
         const embed = buildEmbed(result);
         // Only trigger @here if we KNOW it was previously up — not on first boot (null)
         const wentDown = previousOverall !== null && previousOverall !== "down" && result.overall === "down";
+        const wentClear = previousOverall === "down" && result.overall !== "down";
         // Edit existing message or post new one
         if (statusMessageId) {
             try {
                 const existing = await channel.messages.fetch(statusMessageId);
-                await existing.edit({ embeds: [embed] });
+                // Strip @here from content when the outage clears
+                await existing.edit({ embeds: [embed], ...(wentClear ? { content: "" } : {}) });
             }
             catch {
                 // Message was deleted — post fresh
                 statusMessageId = null;
             }
+        }
+        // Delete standalone @here ping message when outage clears
+        if (wentClear && pingMessageId) {
+            try {
+                const pingMsg = await channel.messages.fetch(pingMessageId);
+                await pingMsg.delete();
+            }
+            catch { /* already deleted, ignore */ }
+            pingMessageId = null;
         }
         if (!statusMessageId) {
             const content = wentDown && DISCORD_PING_ON_RED ? "@here" : undefined;
@@ -66,8 +78,9 @@ async function runPoll() {
             console.log(`📌 Status message ID: ${statusMessageId} — set STATUS_MESSAGE_ID in Railway env to persist across restarts`);
         }
         else if (wentDown && DISCORD_PING_ON_RED) {
-            // Message already existed, send a separate @here ping
-            await channel.send("@here Ollama Cloud is down! 🔴");
+            // Message already existed, send a separate @here ping and track it for cleanup
+            const pingMsg = await channel.send("@here Ollama Cloud is down! 🔴");
+            pingMessageId = pingMsg.id;
         }
         console.log(`✅ Polled at ${result.checkedAt.toISOString()} — overall: ${result.overall}`);
     }
