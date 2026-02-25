@@ -2,7 +2,7 @@
 // FILE: src/index.ts
 // Canary — Ollama Cloud Status Monitor
 // ---------------------------------------------------------------
-import { Client, GatewayIntentBits, } from "discord.js";
+import { Client, GatewayIntentBits, Partials, } from "discord.js";
 import { pollAllModels } from "./monitor.js";
 import { buildEmbed } from "./embed.js";
 import { POLL_INTERVAL_HEALTHY, POLL_INTERVAL_DEGRADED, POLL_INTERVAL_DOWN, DISCORD_PING_ON_RED, } from "./config.js";
@@ -21,7 +21,12 @@ let lastResult = null;
 let pollTimer = null;
 // ── Discord Client ─────────────────────────────────────────────
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds],
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+    ],
+    partials: [Partials.Message],
 });
 client.once("ready", async () => {
     console.log(`🐤 Canary is online as ${client.user?.tag}`);
@@ -78,5 +83,24 @@ async function runPoll() {
     pollTimer = setTimeout(runPoll, interval);
     console.log(`⏰ Next poll in ${interval / 60_000} min`);
 }
+// ── On-demand test command: @canary test ───────────────────────
+client.on("messageCreate", async (message) => {
+    if (message.author.bot)
+        return;
+    if (!client.user || !message.mentions.has(client.user))
+        return;
+    if (!message.content.toLowerCase().includes("test"))
+        return;
+    await message.reply("🔍 Running a fresh check on all models...");
+    try {
+        const result = await pollAllModels(OLLAMA_API_KEY, lastResult?.downSince ?? null);
+        lastResult = result;
+        const embed = buildEmbed(result);
+        await message.reply({ embeds: [embed] });
+    }
+    catch (err) {
+        await message.reply("❌ Check failed: " + (err instanceof Error ? err.message : String(err)));
+    }
+});
 // ── Boot ───────────────────────────────────────────────────────
 client.login(DISCORD_TOKEN);
