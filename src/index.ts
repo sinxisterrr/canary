@@ -6,6 +6,7 @@
 import {
   Client,
   GatewayIntentBits,
+  Partials,
   TextChannel,
   Message,
 } from "discord.js";
@@ -39,7 +40,12 @@ let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
 // ── Discord Client ─────────────────────────────────────────────
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+  partials: [Partials.Message],
 });
 
 client.once("ready", async () => {
@@ -103,6 +109,24 @@ async function runPoll() {
   pollTimer = setTimeout(runPoll, interval);
   console.log(`⏰ Next poll in ${interval / 60_000} min`);
 }
+
+// ── On-demand test command: @canary test ───────────────────────
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
+  if (!client.user || !message.mentions.has(client.user)) return;
+  if (!message.content.toLowerCase().includes("test")) return;
+
+  await message.reply("🔍 Running a fresh check on all models...");
+
+  try {
+    const result = await pollAllModels(OLLAMA_API_KEY, lastResult?.downSince ?? null);
+    lastResult = result;
+    const embed = buildEmbed(result);
+    await message.reply({ embeds: [embed] });
+  } catch (err) {
+    await message.reply("❌ Check failed: " + (err instanceof Error ? err.message : String(err)));
+  }
+});
 
 // ── Boot ───────────────────────────────────────────────────────
 client.login(DISCORD_TOKEN);
