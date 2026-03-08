@@ -32,4 +32,4 @@ export const REQUEST_TIMEOUT_MS = 30_000;    // 30s hard timeout per model ping
 export const IGNORED_ERROR_CODES = [429];
 
 // Discord
-export const DISCORD_PING_ON_RED = true; // @here when status goes red
+export const DISCORD_PING_ON_RED = false; // @here when status goes red
