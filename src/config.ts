@@ -19,8 +19,8 @@ export const MONITORED_MODELS = [
 export const OLLAMA_BASE_URL = "https://ollama.com";
 
 // Timing (ms)
-export const POLL_INTERVAL_HEALTHY = 1 * 60 * 1000;    // 1 min when green
-export const POLL_INTERVAL_DEGRADED = 1 * 60 * 1000;   // 1 min when yellow
+export const POLL_INTERVAL_HEALTHY = 1 * 120 * 1000;    // 1 min when green
+export const POLL_INTERVAL_DEGRADED = 1 * 120 * 1000;   // 1 min when yellow
 export const POLL_INTERVAL_DOWN = 1 * 60 * 1000;       // 1 min when red
 
 // Thresholds
