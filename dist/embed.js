@@ -52,9 +52,17 @@ function formatResponseTime(ms, error) {
 }
 function renderModelLine(m, pad) {
     const emoji = STATUS_EMOJI[m.status];
-    const time = m.status === "down"
-        ? formatErrorLabel(m.error)
-        : formatResponseTime(m.responseMs, m.error);
+    let time;
+    if (m.status === "down") {
+        time = formatErrorLabel(m.error);
+    }
+    else if (m.rateLimited) {
+        // The response time is meaningless for 429s — don't show it
+        time = "429 rate limited";
+    }
+    else {
+        time = formatResponseTime(m.responseMs, m.error);
+    }
     return `${emoji} \`${m.model.padEnd(pad)}\` ${time}`;
 }
 function renderSection(title, models, pad) {
@@ -75,13 +83,14 @@ function formatDownSince(downSince, checkedAt) {
 }
 export function buildEmbed(result) {
     const { overall, models, checkedAt, downSince, totalCount, pingedCount } = result;
-    const { fastest, average, slowest, down } = categorize(models);
+    const { fastest, average, slowest, rateLimited, down } = categorize(models);
     // Global pad width so every section's model names align with each other
-    const pad = columnWidth([...fastest, ...average, ...slowest, ...down]);
+    const pad = columnWidth([...fastest, ...average, ...slowest, ...rateLimited, ...down]);
     const sections = [
         renderSection("⚡ Fastest", fastest, pad),
         renderSection("〰️  Average", average, pad),
         renderSection("🐢 Slowest", slowest, pad),
+        renderSection(`🟡 Rate Limited (${rateLimited.length})`, rateLimited, pad),
         renderSection(`🔴 Down (${down.length})`, down, pad),
     ].filter(Boolean);
     const downSinceText = formatDownSince(downSince, checkedAt);

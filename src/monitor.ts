@@ -22,7 +22,8 @@ export interface ModelResult {
   status: ModelStatus;
   responseMs: number | null;
   error?: string;
-  skipped?: boolean; // true if we reused a cached result instead of pinging
+  skipped?: boolean;     // true if we reused a cached result instead of pinging
+  rateLimited?: boolean; // true if the API returned 429 — latency isn't a real speed read
 }
 
 export interface PollResult {
@@ -87,6 +88,7 @@ async function pingModel(model: string, apiKey: string): Promise<ModelResult> {
         model,
         status: "degraded",
         responseMs,
+        rateLimited: true,
         error: `${res.status} (rate limited — account issue, not outage)`,
       };
     }

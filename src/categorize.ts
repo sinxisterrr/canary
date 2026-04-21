@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------
 // FILE: src/categorize.ts
-// Buckets ping results into Fastest / Average / Slowest / Down.
+// Buckets ping results into Fastest / Average / Slowest / Rate Limited / Down.
 // Pure function — no state, no hardcoded model names.
 // ---------------------------------------------------------------
 
@@ -15,30 +15,31 @@ export interface Buckets {
   fastest: ModelResult[];
   average: ModelResult[];
   slowest: ModelResult[];
+  rateLimited: ModelResult[];
   down: ModelResult[];
 }
 
 /**
- * Split results into four buckets. A model appears in exactly one bucket.
- * Selection order: down → fastest → slowest → average (from the responding pool).
- * This guarantees no dedup logic is needed — once picked, a model is removed
- * from the candidate pool.
+ * Split results into five buckets. A model appears in exactly one bucket.
+ *
+ * - Down: hard failures (HTTP 500, timeouts, etc.)
+ * - Rate Limited: 429s — responded fast but not with a real speed read,
+ *   kept out of the speed buckets so they don't pollute rankings.
+ * - Fastest / Average / Slowest: drawn from the remaining responding pool.
  */
 export function categorize(results: ModelResult[]): Buckets {
-  // Down is always shown when present — includes hard failures AND ignored-code 429s
   const down = results.filter((r) => r.status === "down");
+  const rateLimited = results.filter((r) => r.rateLimited);
 
-  // Only models that actually responded are eligible for speed buckets
+  // Only models that gave a real, successful latency measurement feed the speed buckets
   const responding = results
-    .filter((r) => r.responseMs !== null)
+    .filter((r) => !r.rateLimited && r.status !== "down" && r.responseMs !== null)
     .sort((a, b) => (a.responseMs ?? 0) - (b.responseMs ?? 0));
 
   const pool = [...responding];
-
   const fastest = pool.splice(0, DISPLAY_FASTEST);
-  const slowest = pool.splice(-DISPLAY_SLOWEST).reverse(); // slowest first
+  const slowest = pool.splice(-DISPLAY_SLOWEST).reverse();
 
-  // "Average" = models closest to the median of the remaining pool
   const average: ModelResult[] = [];
   if (pool.length > 0) {
     const median = pool[Math.floor(pool.length / 2)].responseMs ?? 0;
@@ -48,9 +49,8 @@ export function categorize(results: ModelResult[]): Buckets {
       return da - db;
     });
     average.push(...byProximity.slice(0, DISPLAY_AVERAGE));
-    // Present average-bucket in actual latency order, low → high
     average.sort((a, b) => (a.responseMs ?? 0) - (b.responseMs ?? 0));
   }
 
-  return { fastest, average, slowest, down };
+  return { fastest, average, slowest, rateLimited, down };
 }

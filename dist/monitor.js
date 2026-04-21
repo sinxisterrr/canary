@@ -45,6 +45,7 @@ async function pingModel(model, apiKey) {
                 model,
                 status: "degraded",
                 responseMs,
+                rateLimited: true,
                 error: `${res.status} (rate limited — account issue, not outage)`,
             };
         }
