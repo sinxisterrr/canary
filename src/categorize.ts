@@ -31,9 +31,11 @@ export function categorize(results: ModelResult[]): Buckets {
   const down = results.filter((r) => r.status === "down");
   const rateLimited = results.filter((r) => r.rateLimited);
 
-  // Only models that gave a real, successful latency measurement feed the speed buckets
+  // Only models that gave a real, successful latency measurement feed the speed buckets.
+  // Any result with an error field set (HTTP 403/500/etc., rate-limit, timeout) is excluded —
+  // its latency isn't a meaningful speed signal.
   const responding = results
-    .filter((r) => !r.rateLimited && r.status !== "down" && r.responseMs !== null)
+    .filter((r) => !r.rateLimited && !r.error && r.status !== "down" && r.responseMs !== null)
     .sort((a, b) => (a.responseMs ?? 0) - (b.responseMs ?? 0));
 
   const pool = [...responding];

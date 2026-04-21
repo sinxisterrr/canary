@@ -15,9 +15,11 @@ import { DISPLAY_FASTEST, DISPLAY_AVERAGE, DISPLAY_SLOWEST, } from "./config.js"
 export function categorize(results) {
     const down = results.filter((r) => r.status === "down");
     const rateLimited = results.filter((r) => r.rateLimited);
-    // Only models that gave a real, successful latency measurement feed the speed buckets
+    // Only models that gave a real, successful latency measurement feed the speed buckets.
+    // Any result with an error field set (HTTP 403/500/etc., rate-limit, timeout) is excluded —
+    // its latency isn't a meaningful speed signal.
     const responding = results
-        .filter((r) => !r.rateLimited && r.status !== "down" && r.responseMs !== null)
+        .filter((r) => !r.rateLimited && !r.error && r.status !== "down" && r.responseMs !== null)
         .sort((a, b) => (a.responseMs ?? 0) - (b.responseMs ?? 0));
     const pool = [...responding];
     const fastest = pool.splice(0, DISPLAY_FASTEST);
