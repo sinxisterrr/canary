@@ -9,7 +9,12 @@ const backoff = new Map();
 function getState(model) {
     let s = backoff.get(model);
     if (!s) {
-        s = { consecutiveFailures: 0, skipCyclesRemaining: 0, lastResult: null };
+        s = {
+            consecutiveFailures: 0,
+            skipCyclesRemaining: 0,
+            lastResult: null,
+            downSince: null,
+        };
         backoff.set(model, s);
     }
     return s;
@@ -95,7 +100,7 @@ async function checkModel(model, apiKey) {
     // Currently in backoff? Reuse last result and decrement the counter.
     if (state.skipCyclesRemaining > 0 && state.lastResult) {
         state.skipCyclesRemaining -= 1;
-        return { ...state.lastResult, skipped: true };
+        return { ...state.lastResult, skipped: true, downSince: state.downSince };
     }
     const result = await pingModel(model, apiKey);
     if (result.status === "up") {
@@ -108,8 +113,16 @@ async function checkModel(model, apiKey) {
         const cycles = Math.min(BACKOFF_BASE_CYCLES * Math.pow(2, state.consecutiveFailures - 1), BACKOFF_MAX_CYCLES);
         state.skipCyclesRemaining = cycles;
     }
+    // Track per-model downSince — set on first "down" observation, cleared when it recovers
+    if (result.status === "down") {
+        if (!state.downSince)
+            state.downSince = new Date();
+    }
+    else {
+        state.downSince = null;
+    }
     state.lastResult = result;
-    return result;
+    return { ...result, downSince: state.downSince };
 }
 export async function pollAllModels(models, apiKey, previousDownSince) {
     const results = await runWithConcurrency(models, PING_CONCURRENCY, (m) => checkModel(m, apiKey));

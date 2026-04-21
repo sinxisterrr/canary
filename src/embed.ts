@@ -41,10 +41,22 @@ function formatResponseTime(ms: number | null, error?: string): string {
   return `${ms}ms (${seconds}s)${slow}`;
 }
 
-function renderModelLine(m: ModelResult, pad: number, dot: string): string {
+// "· 7m ago" — shown next to each down model so you know when it went red
+function formatDownDuration(downSince: Date | null | undefined, now: Date): string {
+  if (!downSince) return "";
+  const diffMs = now.getTime() - downSince.getTime();
+  const diffMin = Math.floor(diffMs / 60_000);
+  if (diffMin < 1) return " · just now";
+  const diffHr = Math.floor(diffMin / 60);
+  const remaining = diffMin % 60;
+  const duration = diffHr > 0 ? `${diffHr}h ${remaining}m` : `${diffMin}m`;
+  return ` · ${duration}`;
+}
+
+function renderModelLine(m: ModelResult, pad: number, dot: string, now: Date): string {
   let time: string;
   if (m.status === "down") {
-    time = formatErrorLabel(m.error);
+    time = formatErrorLabel(m.error) + formatDownDuration(m.downSince, now);
   } else if (m.rateLimited) {
     time = "429 rate limited";
   } else {
@@ -57,39 +69,27 @@ function renderSection(
   title: string,
   models: ModelResult[],
   pad: number,
-  dot: string
+  dot: string,
+  now: Date
 ): string {
   if (models.length === 0) return "";
-  const lines = models.map((m) => renderModelLine(m, pad, dot)).join("\n");
+  const lines = models.map((m) => renderModelLine(m, pad, dot, now)).join("\n");
   return `**${title}**\n${lines}`;
 }
 
-function formatDownSince(downSince: Date | null, checkedAt: Date): string {
-  if (!downSince) return "";
-  const diffMs = checkedAt.getTime() - downSince.getTime();
-  const diffMin = Math.floor(diffMs / 60_000);
-  const diffHr = Math.floor(diffMin / 60);
-  const remaining = diffMin % 60;
-  const duration = diffHr > 0 ? `${diffHr}h ${remaining}m` : `${diffMin}m`;
-  return `🔴 Down since: <t:${Math.floor(downSince.getTime() / 1000)}:t> (${duration})`;
-}
-
 export function buildEmbed(result: PollResult): EmbedBuilder {
-  const { overall, models, checkedAt, downSince, totalCount, pingedCount } = result;
+  const { overall, models, checkedAt, totalCount, pingedCount } = result;
   const { fastest, average, slowest, rateLimited, down } = categorize(models);
 
   const pad = columnWidth([...fastest, ...average, ...slowest, ...rateLimited, ...down]);
 
   const sections = [
-    renderSection("⚡ Fastest", fastest, pad, "🟠"),
-    renderSection("🪻 Average", average, pad, "🟣"),
-    renderSection("🐢 Slowest", slowest, pad, "🟢"),
-    renderSection(`🟡 Rate Limited (${rateLimited.length})`, rateLimited, pad, "🟡"),
-    renderSection(`🚩 Down (${down.length})`, down, pad, "🔴"),
+    renderSection("⚡ Fastest", fastest, pad, "🟠", checkedAt),
+    renderSection("🪻 Average", average, pad, "🟣", checkedAt),
+    renderSection("🐢 Slowest", slowest, pad, "🟢", checkedAt),
+    renderSection(`🟡 Rate Limited (${rateLimited.length})`, rateLimited, pad, "🟡", checkedAt),
+    renderSection(`🚩 Down (${down.length})`, down, pad, "🔴", checkedAt),
   ].filter(Boolean);
-
-  const downSinceText = formatDownSince(downSince, checkedAt);
-  if (downSinceText) sections.push(downSinceText);
 
   const skipped = totalCount - pingedCount;
   const footerText =

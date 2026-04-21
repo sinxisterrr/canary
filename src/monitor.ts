@@ -24,6 +24,7 @@ export interface ModelResult {
   error?: string;
   skipped?: boolean;     // true if we reused a cached result instead of pinging
   rateLimited?: boolean; // true if the API returned 429 — latency isn't a real speed read
+  downSince?: Date | null; // set while the model has been continuously down
 }
 
 export interface PollResult {
@@ -40,13 +41,19 @@ interface BackoffState {
   consecutiveFailures: number;
   skipCyclesRemaining: number;
   lastResult: ModelResult | null;
+  downSince: Date | null; // timestamp of the first "down" observation in the current streak
 }
 const backoff = new Map<string, BackoffState>();
 
 function getState(model: string): BackoffState {
   let s = backoff.get(model);
   if (!s) {
-    s = { consecutiveFailures: 0, skipCyclesRemaining: 0, lastResult: null };
+    s = {
+      consecutiveFailures: 0,
+      skipCyclesRemaining: 0,
+      lastResult: null,
+      downSince: null,
+    };
     backoff.set(model, s);
   }
   return s;
@@ -147,7 +154,7 @@ async function checkModel(model: string, apiKey: string): Promise<ModelResult> {
   // Currently in backoff? Reuse last result and decrement the counter.
   if (state.skipCyclesRemaining > 0 && state.lastResult) {
     state.skipCyclesRemaining -= 1;
-    return { ...state.lastResult, skipped: true };
+    return { ...state.lastResult, skipped: true, downSince: state.downSince };
   }
 
   const result = await pingModel(model, apiKey);
@@ -165,8 +172,15 @@ async function checkModel(model: string, apiKey: string): Promise<ModelResult> {
     state.skipCyclesRemaining = cycles;
   }
 
+  // Track per-model downSince — set on first "down" observation, cleared when it recovers
+  if (result.status === "down") {
+    if (!state.downSince) state.downSince = new Date();
+  } else {
+    state.downSince = null;
+  }
+
   state.lastResult = result;
-  return result;
+  return { ...result, downSince: state.downSince };
 }
 
 export async function pollAllModels(
