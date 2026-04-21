@@ -11,12 +11,6 @@ const EMBED_COLOR = {
     degraded: 0xfee75c,
     down: 0xed4245,
 };
-// Title emoji that reflects overall health at a glance.
-const OVERALL_EMOJI = {
-    up: "🟢",
-    degraded: "🟡",
-    down: "🔴",
-};
 function columnWidth(models) {
     return Math.max(0, ...models.map((m) => m.model.length));
 }
@@ -97,7 +91,7 @@ export function buildEmbed(result) {
         ? `Monitoring ${totalCount} cloud models • ${pingedCount} pinged, ${skipped} in backoff • Last checked`
         : `Monitoring ${totalCount} cloud models • Last checked`;
     return new EmbedBuilder()
-        .setTitle(`${OVERALL_EMOJI[overall]} Ollama Cloud Status`)
+        .setTitle(`☁️ Ollama Cloud Status`)
         .setDescription(sections.join("\n\n"))
         .setColor(EMBED_COLOR[overall])
         .setFooter({ text: footerText })
