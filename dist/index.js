@@ -5,13 +5,12 @@
 import { Client, GatewayIntentBits, Partials, } from "discord.js";
 import { pollAllModels } from "./monitor.js";
 import { buildEmbed } from "./embed.js";
-import { POLL_INTERVAL_HEALTHY, POLL_INTERVAL_DEGRADED, POLL_INTERVAL_DOWN, DISCORD_PING_ON_RED, } from "./config.js";
+import { getCloudModels } from "./discovery.js";
+import { POLL_INTERVAL_HEALTHY, POLL_INTERVAL_DEGRADED, POLL_INTERVAL_DOWN, DISCORD_PING_ON_RED, DISCOVERY_REFRESH_MS, } from "./config.js";
 // ── Env ────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 const OLLAMA_API_KEY = process.env.OLLAMA_API_KEY;
-// Optional: persist message ID across restarts via env
-// On Railway: set STATUS_MESSAGE_ID after first run
 let statusMessageId = process.env.STATUS_MESSAGE_ID ?? null;
 if (!DISCORD_TOKEN || !DISCORD_CHANNEL_ID || !OLLAMA_API_KEY) {
     throw new Error("Missing required env vars: DISCORD_TOKEN, DISCORD_CHANNEL_ID, OLLAMA_API_KEY");
@@ -19,7 +18,9 @@ if (!DISCORD_TOKEN || !DISCORD_CHANNEL_ID || !OLLAMA_API_KEY) {
 // ── State ──────────────────────────────────────────────────────
 let lastResult = null;
 let pollTimer = null;
-let pingMessageId = null; // tracks standalone @here ping messages
+let pingMessageId = null;
+let modelList = [];
+let lastDiscoveryAt = 0;
 // ── Discord Client ─────────────────────────────────────────────
 const client = new Client({
     intents: [
@@ -31,35 +32,47 @@ const client = new Client({
 });
 client.once("ready", async () => {
     console.log(`🐤 Canary is online as ${client.user?.tag}`);
+    await refreshModelList();
     await runPoll();
 });
+async function refreshModelList(force = false) {
+    try {
+        modelList = await getCloudModels(force);
+        lastDiscoveryAt = Date.now();
+        console.log(`📋 Model list: ${modelList.length} tags`);
+    }
+    catch (err) {
+        console.error("Discovery failed:", err);
+        if (modelList.length === 0)
+            throw err; // no fallback on first boot
+    }
+}
 // ── Poll Loop ──────────────────────────────────────────────────
 async function runPoll() {
     try {
+        // Refresh the catalog if the cache has aged out
+        if (Date.now() - lastDiscoveryAt > DISCOVERY_REFRESH_MS) {
+            await refreshModelList();
+        }
         const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
         if (!channel)
             throw new Error("Channel not found");
         const previousDownSince = lastResult?.downSince ?? null;
         const previousOverall = lastResult?.overall ?? null;
-        const result = await pollAllModels(OLLAMA_API_KEY, previousDownSince);
+        const result = await pollAllModels(modelList, OLLAMA_API_KEY, previousDownSince);
         lastResult = result;
         const embed = buildEmbed(result);
-        // Only trigger @here if we KNOW it was previously up — not on first boot (null)
         const wentDown = previousOverall !== null && previousOverall !== "down" && result.overall === "down";
         const wentClear = previousOverall === "down" && result.overall !== "down";
-        // Edit existing message or post new one
         if (statusMessageId) {
             try {
                 const existing = await channel.messages.fetch(statusMessageId);
-                // Strip @here from content when the outage clears
                 await existing.edit({ embeds: [embed], ...(wentClear ? { content: "" } : {}) });
             }
             catch {
-                // Message was deleted — post fresh
                 statusMessageId = null;
             }
         }
-        // Delete standalone @here ping message when outage clears
         if (wentClear && pingMessageId) {
             try {
                 const pingMsg = await channel.messages.fetch(pingMessageId);
@@ -70,24 +83,19 @@ async function runPoll() {
         }
         if (!statusMessageId) {
             const content = wentDown && DISCORD_PING_ON_RED ? "@here" : undefined;
-            const posted = await channel.send({
-                content,
-                embeds: [embed],
-            });
+            const posted = await channel.send({ content, embeds: [embed] });
             statusMessageId = posted.id;
             console.log(`📌 Status message ID: ${statusMessageId} — set STATUS_MESSAGE_ID in Railway env to persist across restarts`);
         }
         else if (wentDown && DISCORD_PING_ON_RED) {
-            // Message already existed, send a separate @here ping and track it for cleanup
             const pingMsg = await channel.send("@here Ollama Cloud is down! 🔴");
             pingMessageId = pingMsg.id;
         }
-        console.log(`✅ Polled at ${result.checkedAt.toISOString()} — overall: ${result.overall}`);
+        console.log(`✅ Polled at ${result.checkedAt.toISOString()} — overall: ${result.overall} (${result.pingedCount}/${result.totalCount} pinged)`);
     }
     catch (err) {
         console.error("Poll failed:", err);
     }
-    // Schedule next poll based on current status
     const interval = lastResult?.overall === "down"
         ? POLL_INTERVAL_DOWN
         : lastResult?.overall === "degraded"
@@ -96,23 +104,35 @@ async function runPoll() {
     pollTimer = setTimeout(runPoll, interval);
     console.log(`⏰ Next poll in ${interval / 60_000} min`);
 }
-// ── On-demand test command: @canary test ───────────────────────
+// ── On-demand commands: @canary test | @canary refresh ─────────
 client.on("messageCreate", async (message) => {
     if (message.author.bot)
         return;
     if (!client.user || !message.mentions.has(client.user))
         return;
-    if (!message.content.toLowerCase().includes("test"))
+    const content = message.content.toLowerCase();
+    if (content.includes("refresh")) {
+        await message.reply("🔎 Re-scraping the Ollama cloud catalog...");
+        try {
+            await refreshModelList(true);
+            await message.reply(`📋 Model list refreshed — ${modelList.length} tags`);
+        }
+        catch (err) {
+            await message.reply("❌ Refresh failed: " + (err instanceof Error ? err.message : String(err)));
+        }
         return;
-    await message.reply("🔍 Running a fresh check on all models...");
-    try {
-        const result = await pollAllModels(OLLAMA_API_KEY, lastResult?.downSince ?? null);
-        lastResult = result;
-        const embed = buildEmbed(result);
-        await message.reply({ embeds: [embed] });
     }
-    catch (err) {
-        await message.reply("❌ Check failed: " + (err instanceof Error ? err.message : String(err)));
+    if (content.includes("test")) {
+        await message.reply("🔍 Running a fresh check on all models...");
+        try {
+            const result = await pollAllModels(modelList, OLLAMA_API_KEY, lastResult?.downSince ?? null);
+            lastResult = result;
+            const embed = buildEmbed(result);
+            await message.reply({ embeds: [embed] });
+        }
+        catch (err) {
+            await message.reply("❌ Check failed: " + (err instanceof Error ? err.message : String(err)));
+        }
     }
 });
 // ── Boot ───────────────────────────────────────────────────────

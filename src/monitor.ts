@@ -1,15 +1,18 @@
 // ---------------------------------------------------------------
 // FILE: src/monitor.ts
-// Pings each model and returns structured status results
+// Pings each cloud model and returns structured status results.
+// Features: concurrency throttle + exponential backoff on errors.
 // ---------------------------------------------------------------
 
 import fetch from "node-fetch";
 import {
-  MONITORED_MODELS,
   OLLAMA_BASE_URL,
   DEGRADED_THRESHOLD_MS,
   REQUEST_TIMEOUT_MS,
   IGNORED_ERROR_CODES,
+  PING_CONCURRENCY,
+  BACKOFF_BASE_CYCLES,
+  BACKOFF_MAX_CYCLES,
 } from "./config.js";
 
 export type ModelStatus = "up" | "degraded" | "down";
@@ -19,6 +22,7 @@ export interface ModelResult {
   status: ModelStatus;
   responseMs: number | null;
   error?: string;
+  skipped?: boolean; // true if we reused a cached result instead of pinging
 }
 
 export interface PollResult {
@@ -26,15 +30,34 @@ export interface PollResult {
   models: ModelResult[];
   checkedAt: Date;
   downSince: Date | null;
+  totalCount: number;  // how many cloud models exist in total
+  pingedCount: number; // how many were actually pinged this cycle (rest were backed-off)
 }
 
-// Minimal valid chat payload — no system prompt, no tools, tiny token ask
+// Per-model backoff + last-result cache. Keyed by full model tag.
+interface BackoffState {
+  consecutiveFailures: number;
+  skipCyclesRemaining: number;
+  lastResult: ModelResult | null;
+}
+const backoff = new Map<string, BackoffState>();
+
+function getState(model: string): BackoffState {
+  let s = backoff.get(model);
+  if (!s) {
+    s = { consecutiveFailures: 0, skipCyclesRemaining: 0, lastResult: null };
+    backoff.set(model, s);
+  }
+  return s;
+}
+
+// Minimal valid chat payload — no system prompt, no tools, 1-token ask
 function buildPingPayload(model: string) {
   return {
     model,
     messages: [{ role: "user", content: "hi" }],
     stream: false,
-    options: { num_predict: 1 }, // ask for 1 token — we just want a 200 back
+    options: { num_predict: 1 },
   };
 }
 
@@ -59,7 +82,6 @@ async function pingModel(model: string, apiKey: string): Promise<ModelResult> {
     clearTimeout(timeout);
     const responseMs = Date.now() - start;
 
-    // Codes we ignore — these are account-level issues, not outages
     if (IGNORED_ERROR_CODES.includes(res.status)) {
       return {
         model,
@@ -70,18 +92,11 @@ async function pingModel(model: string, apiKey: string): Promise<ModelResult> {
     }
 
     if (!res.ok) {
-      return {
-        model,
-        status: "down",
-        responseMs,
-        error: `HTTP ${res.status}`,
-      };
+      return { model, status: "down", responseMs, error: `HTTP ${res.status}` };
     }
 
-    // Successful response — check if it was slow
     const status: ModelStatus =
       responseMs > DEGRADED_THRESHOLD_MS ? "degraded" : "up";
-
     return { model, status, responseMs };
   } catch (err: any) {
     clearTimeout(timeout);
@@ -95,36 +110,85 @@ async function pingModel(model: string, apiKey: string): Promise<ModelResult> {
   }
 }
 
-// Determine worst overall status from model results
+// Run an async worker over `items` with at most `concurrency` in flight at once.
+async function runWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+
+  async function next(): Promise<void> {
+    while (true) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i]);
+    }
+  }
+
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, () => next());
+  await Promise.all(runners);
+  return results;
+}
+
 function overallStatus(models: ModelResult[]): ModelStatus {
   if (models.some((m) => m.status === "down")) return "down";
   if (models.some((m) => m.status === "degraded")) return "degraded";
   return "up";
 }
 
+// Called once per poll for every cloud model. Handles backoff/skip and caches results.
+async function checkModel(model: string, apiKey: string): Promise<ModelResult> {
+  const state = getState(model);
+
+  // Currently in backoff? Reuse last result and decrement the counter.
+  if (state.skipCyclesRemaining > 0 && state.lastResult) {
+    state.skipCyclesRemaining -= 1;
+    return { ...state.lastResult, skipped: true };
+  }
+
+  const result = await pingModel(model, apiKey);
+
+  if (result.status === "up") {
+    state.consecutiveFailures = 0;
+    state.skipCyclesRemaining = 0;
+  } else {
+    // Any non-up result (down OR degraded-due-to-429) contributes to backoff
+    state.consecutiveFailures += 1;
+    const cycles = Math.min(
+      BACKOFF_BASE_CYCLES * Math.pow(2, state.consecutiveFailures - 1),
+      BACKOFF_MAX_CYCLES
+    );
+    state.skipCyclesRemaining = cycles;
+  }
+
+  state.lastResult = result;
+  return result;
+}
+
 export async function pollAllModels(
+  models: string[],
   apiKey: string,
   previousDownSince: Date | null
 ): Promise<PollResult> {
-  // Ping all models concurrently
-  const results = await Promise.all(
-    MONITORED_MODELS.map((model) => pingModel(model, apiKey))
+  const results = await runWithConcurrency(models, PING_CONCURRENCY, (m) =>
+    checkModel(m, apiKey)
   );
 
   const overall = overallStatus(results);
+  const pingedCount = results.filter((r) => !r.skipped).length;
 
-  // Track when we first went down
   let downSince = previousDownSince;
-  if (overall === "down" && !downSince) {
-    downSince = new Date();
-  } else if (overall !== "down") {
-    downSince = null;
-  }
+  if (overall === "down" && !downSince) downSince = new Date();
+  else if (overall !== "down") downSince = null;
 
   return {
     overall,
     models: results,
     checkedAt: new Date(),
     downSince,
+    totalCount: models.length,
+    pingedCount,
   };
 }

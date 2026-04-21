@@ -1,16 +1,26 @@
 // ---------------------------------------------------------------
 // FILE: src/monitor.ts
-// Pings each model and returns structured status results
+// Pings each cloud model and returns structured status results.
+// Features: concurrency throttle + exponential backoff on errors.
 // ---------------------------------------------------------------
 import fetch from "node-fetch";
-import { MONITORED_MODELS, OLLAMA_BASE_URL, DEGRADED_THRESHOLD_MS, REQUEST_TIMEOUT_MS, IGNORED_ERROR_CODES, } from "./config.js";
-// Minimal valid chat payload — no system prompt, no tools, tiny token ask
+import { OLLAMA_BASE_URL, DEGRADED_THRESHOLD_MS, REQUEST_TIMEOUT_MS, IGNORED_ERROR_CODES, PING_CONCURRENCY, BACKOFF_BASE_CYCLES, BACKOFF_MAX_CYCLES, } from "./config.js";
+const backoff = new Map();
+function getState(model) {
+    let s = backoff.get(model);
+    if (!s) {
+        s = { consecutiveFailures: 0, skipCyclesRemaining: 0, lastResult: null };
+        backoff.set(model, s);
+    }
+    return s;
+}
+// Minimal valid chat payload — no system prompt, no tools, 1-token ask
 function buildPingPayload(model) {
     return {
         model,
         messages: [{ role: "user", content: "hi" }],
         stream: false,
-        options: { num_predict: 1 }, // ask for 1 token — we just want a 200 back
+        options: { num_predict: 1 },
     };
 }
 async function pingModel(model, apiKey) {
@@ -30,7 +40,6 @@ async function pingModel(model, apiKey) {
         });
         clearTimeout(timeout);
         const responseMs = Date.now() - start;
-        // Codes we ignore — these are account-level issues, not outages
         if (IGNORED_ERROR_CODES.includes(res.status)) {
             return {
                 model,
@@ -40,14 +49,8 @@ async function pingModel(model, apiKey) {
             };
         }
         if (!res.ok) {
-            return {
-                model,
-                status: "down",
-                responseMs,
-                error: `HTTP ${res.status}`,
-            };
+            return { model, status: "down", responseMs, error: `HTTP ${res.status}` };
         }
-        // Successful response — check if it was slow
         const status = responseMs > DEGRADED_THRESHOLD_MS ? "degraded" : "up";
         return { model, status, responseMs };
     }
@@ -62,7 +65,22 @@ async function pingModel(model, apiKey) {
         };
     }
 }
-// Determine worst overall status from model results
+// Run an async worker over `items` with at most `concurrency` in flight at once.
+async function runWithConcurrency(items, concurrency, worker) {
+    const results = new Array(items.length);
+    let cursor = 0;
+    async function next() {
+        while (true) {
+            const i = cursor++;
+            if (i >= items.length)
+                return;
+            results[i] = await worker(items[i]);
+        }
+    }
+    const runners = Array.from({ length: Math.min(concurrency, items.length) }, () => next());
+    await Promise.all(runners);
+    return results;
+}
 function overallStatus(models) {
     if (models.some((m) => m.status === "down"))
         return "down";
@@ -70,22 +88,43 @@ function overallStatus(models) {
         return "degraded";
     return "up";
 }
-export async function pollAllModels(apiKey, previousDownSince) {
-    // Ping all models concurrently
-    const results = await Promise.all(MONITORED_MODELS.map((model) => pingModel(model, apiKey)));
+// Called once per poll for every cloud model. Handles backoff/skip and caches results.
+async function checkModel(model, apiKey) {
+    const state = getState(model);
+    // Currently in backoff? Reuse last result and decrement the counter.
+    if (state.skipCyclesRemaining > 0 && state.lastResult) {
+        state.skipCyclesRemaining -= 1;
+        return { ...state.lastResult, skipped: true };
+    }
+    const result = await pingModel(model, apiKey);
+    if (result.status === "up") {
+        state.consecutiveFailures = 0;
+        state.skipCyclesRemaining = 0;
+    }
+    else {
+        // Any non-up result (down OR degraded-due-to-429) contributes to backoff
+        state.consecutiveFailures += 1;
+        const cycles = Math.min(BACKOFF_BASE_CYCLES * Math.pow(2, state.consecutiveFailures - 1), BACKOFF_MAX_CYCLES);
+        state.skipCyclesRemaining = cycles;
+    }
+    state.lastResult = result;
+    return result;
+}
+export async function pollAllModels(models, apiKey, previousDownSince) {
+    const results = await runWithConcurrency(models, PING_CONCURRENCY, (m) => checkModel(m, apiKey));
     const overall = overallStatus(results);
-    // Track when we first went down
+    const pingedCount = results.filter((r) => !r.skipped).length;
     let downSince = previousDownSince;
-    if (overall === "down" && !downSince) {
+    if (overall === "down" && !downSince)
         downSince = new Date();
-    }
-    else if (overall !== "down") {
+    else if (overall !== "down")
         downSince = null;
-    }
     return {
         overall,
         models: results,
         checkedAt: new Date(),
         downSince,
+        totalCount: models.length,
+        pingedCount,
     };
 }
