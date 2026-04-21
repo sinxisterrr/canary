@@ -78,7 +78,7 @@ export function buildEmbed(result) {
     const pad = columnWidth([...fastest, ...average, ...slowest, ...rateLimited, ...down]);
     const sections = [
         renderSection("⚡ Fastest", fastest, pad, "🟠"),
-        renderSection("〰️  Average", average, pad, "🟣"),
+        renderSection("🪻 Average", average, pad, "🟣"),
         renderSection("🐢 Slowest", slowest, pad, "🟢"),
         renderSection(`🟡 Rate Limited (${rateLimited.length})`, rateLimited, pad, "🟡"),
         renderSection(`🚩 Down (${down.length})`, down, pad, "🔴"),
