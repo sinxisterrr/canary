@@ -6,11 +6,15 @@
 // ---------------------------------------------------------------
 import { EmbedBuilder } from "discord.js";
 import { categorize } from "./categorize.js";
-const EMBED_COLOR = {
-    up: 0x57f287,
-    degraded: 0xfee75c,
-    down: 0xed4245,
-};
+// Sidebar color: sky blue by default. With 37+ models there's usually something
+// down, so red would be permanent — the Down section count already conveys that.
+// Yellow only when a real response was slow (>10s), i.e. actual cloud latency.
+const COLOR_HEALTHY = 0x87ceeb;
+const COLOR_SLOW = 0xfee75c;
+function pickSidebarColor(models) {
+    const anySlow = models.some((m) => m.status === "degraded" && !m.rateLimited);
+    return anySlow ? COLOR_SLOW : COLOR_HEALTHY;
+}
 function columnWidth(models) {
     return Math.max(0, ...models.map((m) => m.model.length));
 }
@@ -76,7 +80,7 @@ function renderSection(title, models, pad, dot, now) {
     return `**${title}**\n${lines}`;
 }
 export function buildEmbed(result) {
-    const { overall, models, checkedAt, totalCount, pingedCount } = result;
+    const { models, checkedAt, totalCount, pingedCount } = result;
     const { fastest, average, slowest, rateLimited, down } = categorize(models);
     const pad = columnWidth([...fastest, ...average, ...slowest, ...rateLimited, ...down]);
     const sections = [
@@ -93,7 +97,7 @@ export function buildEmbed(result) {
     return new EmbedBuilder()
         .setTitle(`☁️ Ollama Cloud Status`)
         .setDescription(sections.join("\n\n"))
-        .setColor(EMBED_COLOR[overall])
+        .setColor(pickSidebarColor(models))
         .setFooter({ text: footerText })
         .setTimestamp(checkedAt);
 }
