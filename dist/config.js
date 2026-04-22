@@ -42,6 +42,10 @@ export const EXTRA_CLOUD_TAGS = [
     "mistral-large-3:675b-cloud",
     "qwen3-vl:235b-cloud",
     "qwen3-vl:235b-instruct-cloud",
+    "deepseek-v3.1:671b-cloud",
+    "gemma3:4b-cloud",
+    "gemma3:12b-cloud",
+    "gemma3:27b-cloud",
 ];
 // Discord
 export const DISCORD_PING_ON_RED = false; // @here when status goes red
