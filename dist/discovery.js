@@ -6,7 +6,7 @@
 import fetch from "node-fetch";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { OLLAMA_BASE_URL, OLLAMA_CLOUD_SEARCH_URL, MODEL_CACHE_PATH, DISCOVERY_REFRESH_MS, } from "./config.js";
+import { OLLAMA_BASE_URL, OLLAMA_CLOUD_SEARCH_URL, MODEL_CACHE_PATH, DISCOVERY_REFRESH_MS, EXTRA_CLOUD_TAGS, } from "./config.js";
 // Extract /library/<name> hrefs from the cloud search page
 function extractModelNames(html) {
     const names = new Set();
@@ -54,8 +54,11 @@ async function discover() {
             return [];
         }
     }));
-    const allTags = [...new Set(tagLists.flat())].sort();
-    console.log(`🔎 Resolved ${allTags.length} cloud tags total`);
+    // Union with the supplemental list of older cloud tags that Ollama doesn't feature
+    const allTags = [...new Set([...tagLists.flat(), ...EXTRA_CLOUD_TAGS])].sort();
+    const extraCount = EXTRA_CLOUD_TAGS.filter((t) => !tagLists.flat().includes(t)).length;
+    console.log(`🔎 Resolved ${allTags.length} cloud tags total` +
+        (extraCount > 0 ? ` (${extraCount} from supplement list)` : ""));
     return allTags;
 }
 async function readCache() {

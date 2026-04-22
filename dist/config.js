@@ -33,5 +33,15 @@ export const IGNORED_ERROR_CODES = [429];
 export const DISPLAY_FASTEST = 3;
 export const DISPLAY_AVERAGE = 3;
 export const DISPLAY_SLOWEST = 3;
+// Supplemental cloud tags that the scraper misses.
+// Ollama's /search?c=cloud page only shows ~20 "featured" models, but older
+// cloud tags (kimi-k2, mistral-large-3, qwen3-vl) are still valid endpoints.
+// Any tag listed here is unioned with the discovered list on every scrape.
+export const EXTRA_CLOUD_TAGS = [
+    "kimi-k2:1t-cloud",
+    "mistral-large-3:675b-cloud",
+    "qwen3-vl:235b-cloud",
+    "qwen3-vl:235b-instruct-cloud",
+];
 // Discord
 export const DISCORD_PING_ON_RED = false; // @here when status goes red

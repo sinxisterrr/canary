@@ -12,6 +12,7 @@ import {
   OLLAMA_CLOUD_SEARCH_URL,
   MODEL_CACHE_PATH,
   DISCOVERY_REFRESH_MS,
+  EXTRA_CLOUD_TAGS,
 } from "./config.js";
 
 interface ModelCache {
@@ -70,8 +71,13 @@ async function discover(): Promise<string[]> {
     })
   );
 
-  const allTags = [...new Set(tagLists.flat())].sort();
-  console.log(`🔎 Resolved ${allTags.length} cloud tags total`);
+  // Union with the supplemental list of older cloud tags that Ollama doesn't feature
+  const allTags = [...new Set([...tagLists.flat(), ...EXTRA_CLOUD_TAGS])].sort();
+  const extraCount = EXTRA_CLOUD_TAGS.filter((t) => !tagLists.flat().includes(t)).length;
+  console.log(
+    `🔎 Resolved ${allTags.length} cloud tags total` +
+      (extraCount > 0 ? ` (${extraCount} from supplement list)` : "")
+  );
   return allTags;
 }
 
