@@ -53,11 +53,21 @@ function extractCloudTags(name: string, html: string): string[] {
 }
 
 async function fetchText(url: string): Promise<string> {
-  const res = await fetch(url, {
-    headers: { "User-Agent": "canary-status-bot/1.0" },
-  });
-  if (!res.ok) throw new Error(`GET ${url} → HTTP ${res.status}`);
-  return res.text();
+  // node-fetch has no default timeout — if ollama.com hangs the request, the
+  // discovery promise hangs forever, which deadlocks the slash-command refresh.
+  // 20s is plenty for an HTML page and short enough that callers don't stall.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": "canary-status-bot/1.0" },
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`GET ${url} → HTTP ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function discover(): Promise<string[]> {

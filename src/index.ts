@@ -361,17 +361,28 @@ async function handleRefreshSlash(interaction: ChatInputCommandInteraction): Pro
     return;
   }
 
-  // Ephemeral defer — only the user who ran the command sees the confirmation,
-  // which keeps the channel clean. The pinned status message updates for everyone.
-  await interaction.deferReply({ ephemeral: true });
+  // Reply IMMEDIATELY so the "Canary is thinking..." spinner clears. A full
+  // refresh re-pings all 38 models with backoff cleared; if many models time
+  // out it can take 5–10 minutes, which exceeds Discord's 15-min interaction
+  // token window and leaves the spinner stuck forever. Background-run the
+  // refresh and send an ephemeral follow-up when it completes.
+  await interaction.reply({
+    content: "🔄 Refresh started — re-scraping catalog, clearing backoff, re-pinging all models. The pinned status updates when done (can take a few minutes).",
+    ephemeral: true,
+  });
+
   try {
     const channel = await client.channels.fetch(DISCORD_CHANNEL_ID) as TextChannel;
     await performFullRefresh(channel);
-    await interaction.editReply(`✅ Refreshed — ${modelList.length} tags, backoff cleared. Updated the status message above.`);
+    await interaction.followUp({
+      content: `✅ Refreshed — ${modelList.length} tags, backoff cleared. Pinned status updated.`,
+      ephemeral: true,
+    }).catch(() => { /* token may have expired on a long refresh — pinned status already updated, fine */ });
   } catch (err) {
-    await interaction.editReply(
-      "❌ Refresh failed: " + (err instanceof Error ? err.message : String(err))
-    );
+    await interaction.followUp({
+      content: "❌ Refresh failed: " + (err instanceof Error ? err.message : String(err)),
+      ephemeral: true,
+    }).catch(() => {});
   }
 }
 
@@ -383,12 +394,13 @@ client.on("messageCreate", async (message) => {
   const content = message.content.toLowerCase();
 
   if (content.includes("refresh")) {
+    const ack = await message.reply("🔄 Refresh started — re-pinging all models, pinned status updates when done (a few minutes).");
     try {
       const channel = await client.channels.fetch(DISCORD_CHANNEL_ID) as TextChannel;
       await performFullRefresh(channel);
-      await message.reply(`✅ Refreshed — ${modelList.length} tags, backoff cleared. Updated the status message.`);
+      await ack.edit(`✅ Refreshed — ${modelList.length} tags, backoff cleared. Pinned status updated.`).catch(() => {});
     } catch (err) {
-      await message.reply("❌ Refresh failed: " + (err instanceof Error ? err.message : String(err)));
+      await ack.edit("❌ Refresh failed: " + (err instanceof Error ? err.message : String(err))).catch(() => {});
     }
     return;
   }
