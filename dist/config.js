@@ -59,3 +59,28 @@ export const EXTRA_CLOUD_TAGS = [
 ];
 // Discord
 export const DISCORD_PING_ON_RED = false; // @here when status goes red
+// Role IDs allowed to use /refresh. Anyone with one of these roles can fire it.
+export const REFRESH_ROLE_IDS = [
+    "1469539629358125320",
+    "1469535115896946829",
+];
+// Network errors (DNS/connection failures from OUR side) — these mean Hetzner
+// can't reach Ollama, not that the model is broken. We surface them in their
+// own bucket and don't burn backoff on them.
+export const NETWORK_ERROR_PATTERNS = [
+    "EAI_AGAIN",
+    "ENOTFOUND",
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+];
+// How often to walk the full Ollama model library looking for cloud tags.
+// The default catalog page only shows ~20 featured models; a full walk catches
+// every cloud-tagged model in the ~223-model library so we don't have to
+// hand-maintain EXTRA_CLOUD_TAGS as Ollama adds or retires tags.
+export const FULL_LIBRARY_SCAN_MS = 7 * 24 * 60 * 60 * 1000; // weekly
+// Path for persisted runtime state (downSince, backoff counters) so a redeploy
+// doesn't reset every model to "down · just now".
+export const STATE_PATH = "cache/state.json";

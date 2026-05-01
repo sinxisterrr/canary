@@ -62,7 +62,10 @@ function formatDownDuration(downSince, now) {
 }
 function renderModelLine(m, pad, dot, now) {
     let time;
-    if (m.status === "down") {
+    if (m.unreachable) {
+        time = m.error ?? "unreachable";
+    }
+    else if (m.status === "down") {
         time = formatErrorLabel(m.error) + formatDownDuration(m.downSince, now);
     }
     else if (m.rateLimited) {
@@ -81,13 +84,14 @@ function renderSection(title, models, pad, dot, now) {
 }
 export function buildEmbed(result) {
     const { models, checkedAt, totalCount, pingedCount } = result;
-    const { fastest, average, slowest, rateLimited, down } = categorize(models);
-    const pad = columnWidth([...fastest, ...average, ...slowest, ...rateLimited, ...down]);
+    const { fastest, average, slowest, rateLimited, unreachable, down } = categorize(models);
+    const pad = columnWidth([...fastest, ...average, ...slowest, ...rateLimited, ...unreachable, ...down]);
     const sections = [
         renderSection("⚡ Fastest", fastest, pad, "🟠", checkedAt),
         renderSection("🪻 Average", average, pad, "🟣", checkedAt),
         renderSection("🐢 Slowest", slowest, pad, "🟢", checkedAt),
         renderSection(`🟡 Rate Limited (${rateLimited.length})`, rateLimited, pad, "🟡", checkedAt),
+        renderSection(`🌐 Unreachable (${unreachable.length})`, unreachable, pad, "🔵", checkedAt),
         renderSection(`🚩 Down (${down.length})`, down, pad, "🔴", checkedAt),
     ].filter(Boolean);
     const skipped = totalCount - pingedCount;

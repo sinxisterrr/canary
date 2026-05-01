@@ -1,25 +1,25 @@
 // ---------------------------------------------------------------
 // FILE: src/categorize.ts
-// Buckets ping results into Fastest / Average / Slowest / Rate Limited / Down.
+// Buckets ping results into Fastest / Average / Slowest / Rate Limited / Unreachable / Down.
 // Pure function — no state, no hardcoded model names.
 // ---------------------------------------------------------------
 import { DISPLAY_FASTEST, DISPLAY_AVERAGE, DISPLAY_SLOWEST, } from "./config.js";
 /**
- * Split results into five buckets. A model appears in exactly one bucket.
+ * Split results into six buckets. A model appears in exactly one bucket.
  *
- * - Down: hard failures (HTTP 500, timeouts, etc.)
- * - Rate Limited: 429s — responded fast but not with a real speed read,
- *   kept out of the speed buckets so they don't pollute rankings.
+ * - Unreachable: WE couldn't reach Ollama (DNS/network) — not a model fault.
+ * - Down: real failures from Ollama (HTTP 500, timeouts, etc.)
+ * - Rate Limited: 429s — responded fast but not with a real speed read.
  * - Fastest / Average / Slowest: drawn from the remaining responding pool.
  */
 export function categorize(results) {
-    const down = results.filter((r) => r.status === "down");
+    const unreachable = results.filter((r) => r.unreachable);
+    const down = results.filter((r) => r.status === "down" && !r.unreachable);
     const rateLimited = results.filter((r) => r.rateLimited);
     // Only models that gave a real, successful latency measurement feed the speed buckets.
-    // Any result with an error field set (HTTP 403/500/etc., rate-limit, timeout) is excluded —
-    // its latency isn't a meaningful speed signal.
+    // Any result with an error field set (HTTP 403/500/etc., rate-limit, timeout, network) is excluded.
     const responding = results
-        .filter((r) => !r.rateLimited && !r.error && r.status !== "down" && r.responseMs !== null)
+        .filter((r) => !r.rateLimited && !r.unreachable && !r.error && r.status !== "down" && r.responseMs !== null)
         .sort((a, b) => (a.responseMs ?? 0) - (b.responseMs ?? 0));
     const pool = [...responding];
     const fastest = pool.splice(0, DISPLAY_FASTEST);
@@ -35,5 +35,5 @@ export function categorize(results) {
         average.push(...byProximity.slice(0, DISPLAY_AVERAGE));
         average.sort((a, b) => (a.responseMs ?? 0) - (b.responseMs ?? 0));
     }
-    return { fastest, average, slowest, rateLimited, down };
+    return { fastest, average, slowest, rateLimited, unreachable, down };
 }

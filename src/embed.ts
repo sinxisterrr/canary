@@ -60,7 +60,9 @@ function formatDownDuration(downSince: Date | null | undefined, now: Date): stri
 
 function renderModelLine(m: ModelResult, pad: number, dot: string, now: Date): string {
   let time: string;
-  if (m.status === "down") {
+  if (m.unreachable) {
+    time = m.error ?? "unreachable";
+  } else if (m.status === "down") {
     time = formatErrorLabel(m.error) + formatDownDuration(m.downSince, now);
   } else if (m.rateLimited) {
     time = "429 rate limited";
@@ -84,15 +86,16 @@ function renderSection(
 
 export function buildEmbed(result: PollResult): EmbedBuilder {
   const { models, checkedAt, totalCount, pingedCount } = result;
-  const { fastest, average, slowest, rateLimited, down } = categorize(models);
+  const { fastest, average, slowest, rateLimited, unreachable, down } = categorize(models);
 
-  const pad = columnWidth([...fastest, ...average, ...slowest, ...rateLimited, ...down]);
+  const pad = columnWidth([...fastest, ...average, ...slowest, ...rateLimited, ...unreachable, ...down]);
 
   const sections = [
     renderSection("⚡ Fastest", fastest, pad, "🟠", checkedAt),
     renderSection("🪻 Average", average, pad, "🟣", checkedAt),
     renderSection("🐢 Slowest", slowest, pad, "🟢", checkedAt),
     renderSection(`🟡 Rate Limited (${rateLimited.length})`, rateLimited, pad, "🟡", checkedAt),
+    renderSection(`🌐 Unreachable (${unreachable.length})`, unreachable, pad, "🔵", checkedAt),
     renderSection(`🚩 Down (${down.length})`, down, pad, "🔴", checkedAt),
   ].filter(Boolean);
 

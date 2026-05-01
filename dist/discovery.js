@@ -61,6 +61,43 @@ async function discover() {
         (extraCount > 0 ? ` (${extraCount} from supplement list)` : ""));
     return allTags;
 }
+// Walk Ollama's full model library (not just /search?c=cloud) and pull every
+// cloud-tagged variant. Slower (~223 model pages) so it runs weekly, not hourly,
+// but catches every cloud tag without us having to maintain EXTRA_CLOUD_TAGS by
+// hand. Result is unioned with the regular discovery + supplement list.
+export async function discoverFullLibrary() {
+    const libHtml = await fetchText(`${OLLAMA_BASE_URL}/library`);
+    const names = extractModelNames(libHtml);
+    console.log(`📚 Full library scan: ${names.length} model names`);
+    // Throttle to keep ollama.com happy — process in chunks of 8 in parallel.
+    const tagLists = [];
+    const CHUNK = 8;
+    for (let i = 0; i < names.length; i += CHUNK) {
+        const chunk = names.slice(i, i + CHUNK);
+        const results = await Promise.all(chunk.map(async (name) => {
+            try {
+                const html = await fetchText(`${OLLAMA_BASE_URL}/library/${name}/tags`);
+                return extractCloudTags(name, html);
+            }
+            catch {
+                return [];
+            }
+        }));
+        tagLists.push(...results);
+    }
+    const tags = [...new Set(tagLists.flat())].sort();
+    console.log(`📚 Full library scan found ${tags.length} cloud-tagged variants`);
+    return tags;
+}
+// Same as getCloudModels but uses the full library scan as its source. Result
+// is cached normally — overwrites the same models.json the regular discovery uses.
+export async function refreshFullLibrary() {
+    const fullTags = await discoverFullLibrary();
+    const allTags = [...new Set([...fullTags, ...EXTRA_CLOUD_TAGS])].sort();
+    await writeCache(allTags);
+    console.log(`📚 Full-library refresh wrote ${allTags.length} tags to cache`);
+    return allTags;
+}
 async function readCache() {
     try {
         const raw = await fs.readFile(MODEL_CACHE_PATH, "utf8");

@@ -4,13 +4,55 @@
 // Features: concurrency throttle + exponential backoff on errors.
 // ---------------------------------------------------------------
 import fetch from "node-fetch";
-import { OLLAMA_BASE_URL, DEGRADED_THRESHOLD_MS, REQUEST_TIMEOUT_MS, IGNORED_ERROR_CODES, PING_CONCURRENCY, BACKOFF_BASE_CYCLES, BACKOFF_MAX_CYCLES, } from "./config.js";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { OLLAMA_BASE_URL, DEGRADED_THRESHOLD_MS, REQUEST_TIMEOUT_MS, IGNORED_ERROR_CODES, PING_CONCURRENCY, BACKOFF_BASE_CYCLES, BACKOFF_MAX_CYCLES, NETWORK_ERROR_PATTERNS, STATE_PATH, } from "./config.js";
 const backoff = new Map();
 // Wipe all per-model backoff state. Use after a long outage so stale "down since
 // 23h ago" entries don't survive into the next poll — every model gets re-pinged
 // from scratch and its downSince/failure counters reset.
 export function resetBackoffState() {
     backoff.clear();
+}
+// Persist & rehydrate the backoff Map across restarts so a redeploy doesn't
+// wipe every model's downSince and reset to "just now".
+export async function loadPersistedState() {
+    try {
+        const raw = await fs.readFile(STATE_PATH, "utf8");
+        const data = JSON.parse(raw);
+        let restored = 0;
+        for (const [model, s] of Object.entries(data)) {
+            backoff.set(model, {
+                consecutiveFailures: s.consecutiveFailures ?? 0,
+                skipCyclesRemaining: 0, // don't carry skip cycles across restarts — re-evaluate
+                lastResult: s.lastResult ?? null,
+                downSince: s.downSince ? new Date(s.downSince) : null,
+            });
+            restored += 1;
+        }
+        console.log(`💾 Restored backoff state for ${restored} models`);
+    }
+    catch {
+        // No state file yet, or unreadable — fine, start fresh
+    }
+}
+export async function savePersistedState() {
+    const obj = {};
+    for (const [model, s] of backoff.entries()) {
+        obj[model] = {
+            consecutiveFailures: s.consecutiveFailures,
+            skipCyclesRemaining: s.skipCyclesRemaining,
+            lastResult: s.lastResult,
+            downSince: s.downSince ? s.downSince.toISOString() : null,
+        };
+    }
+    try {
+        await fs.mkdir(path.dirname(STATE_PATH), { recursive: true });
+        await fs.writeFile(STATE_PATH, JSON.stringify(obj), "utf8");
+    }
+    catch (err) {
+        console.warn("⚠️  Failed to persist state:", err instanceof Error ? err.message : err);
+    }
 }
 function getState(model) {
     let s = backoff.get(model);
@@ -24,6 +66,10 @@ function getState(model) {
         backoff.set(model, s);
     }
     return s;
+}
+function isNetworkError(err) {
+    const msg = err instanceof Error ? `${err.message} ${err.code ?? ""}` : String(err);
+    return NETWORK_ERROR_PATTERNS.some((p) => msg.includes(p));
 }
 // Minimal valid chat payload — no system prompt, no tools, 1-token ask
 function buildPingPayload(model) {
@@ -69,6 +115,17 @@ async function pingModel(model, apiKey) {
     catch (err) {
         clearTimeout(timeout);
         const isTimeout = err.name === "AbortError";
+        // Network error from our side (DNS lookup failed, connection refused, etc.)
+        // — Ollama might be perfectly fine; flag separately so we don't blame the model.
+        if (isNetworkError(err)) {
+            return {
+                model,
+                status: "down",
+                responseMs: null,
+                unreachable: true,
+                error: `network: ${err.code ?? err.message}`,
+            };
+        }
         return {
             model,
             status: "down",
@@ -93,10 +150,13 @@ async function runWithConcurrency(items, concurrency, worker) {
     await Promise.all(runners);
     return results;
 }
+// Overall status excludes unreachable results — those are *our* network problem,
+// not Ollama's, so they shouldn't drag the overall status to "down".
 function overallStatus(models) {
-    if (models.some((m) => m.status === "down"))
+    const real = models.filter((m) => !m.unreachable);
+    if (real.some((m) => m.status === "down"))
         return "down";
-    if (models.some((m) => m.status === "degraded"))
+    if (real.some((m) => m.status === "degraded"))
         return "degraded";
     return "up";
 }
@@ -109,17 +169,23 @@ async function checkModel(model, apiKey) {
         return { ...state.lastResult, skipped: true, downSince: state.downSince };
     }
     const result = await pingModel(model, apiKey);
+    // Network errors don't burn backoff — they're our problem and we want to keep
+    // probing so we notice as soon as connectivity comes back. Also don't change
+    // downSince, so a model that was "up" 5 min ago doesn't suddenly look "down".
+    if (result.unreachable) {
+        state.lastResult = result;
+        return { ...result, downSince: state.downSince };
+    }
     if (result.status === "up") {
         state.consecutiveFailures = 0;
         state.skipCyclesRemaining = 0;
     }
     else {
-        // Any non-up result (down OR degraded-due-to-429) contributes to backoff
+        // Any non-up, non-network result contributes to backoff
         state.consecutiveFailures += 1;
         const cycles = Math.min(BACKOFF_BASE_CYCLES * Math.pow(2, state.consecutiveFailures - 1), BACKOFF_MAX_CYCLES);
         state.skipCyclesRemaining = cycles;
     }
-    // Track per-model downSince — set on first "down" observation, cleared when it recovers
     if (result.status === "down") {
         if (!state.downSince)
             state.downSince = new Date();
@@ -134,11 +200,14 @@ export async function pollAllModels(models, apiKey, previousDownSince) {
     const results = await runWithConcurrency(models, PING_CONCURRENCY, (m) => checkModel(m, apiKey));
     const overall = overallStatus(results);
     const pingedCount = results.filter((r) => !r.skipped).length;
+    const unreachableCount = results.filter((r) => r.unreachable).length;
     let downSince = previousDownSince;
     if (overall === "down" && !downSince)
         downSince = new Date();
     else if (overall !== "down")
         downSince = null;
+    // Fire-and-forget persist (don't block the poll on disk IO)
+    savePersistedState().catch(() => { });
     return {
         overall,
         models: results,
@@ -146,5 +215,6 @@ export async function pollAllModels(models, apiKey, previousDownSince) {
         downSince,
         totalCount: models.length,
         pingedCount,
+        unreachableCount,
     };
 }

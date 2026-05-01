@@ -2,11 +2,11 @@
 // FILE: src/index.ts
 // Canary — Ollama Cloud Status Monitor
 // ---------------------------------------------------------------
-import { Client, GatewayIntentBits, Partials, } from "discord.js";
-import { pollAllModels, resetBackoffState } from "./monitor.js";
+import { Client, GatewayIntentBits, Partials, SlashCommandBuilder, GuildMember, } from "discord.js";
+import { pollAllModels, resetBackoffState, loadPersistedState, } from "./monitor.js";
 import { buildEmbed } from "./embed.js";
-import { getCloudModels } from "./discovery.js";
-import { POLL_INTERVAL_HEALTHY, POLL_INTERVAL_DEGRADED, POLL_INTERVAL_DOWN, DISCORD_PING_ON_RED, DISCOVERY_REFRESH_MS, } from "./config.js";
+import { getCloudModels, refreshFullLibrary } from "./discovery.js";
+import { POLL_INTERVAL_HEALTHY, POLL_INTERVAL_DEGRADED, POLL_INTERVAL_DOWN, DISCORD_PING_ON_RED, DISCOVERY_REFRESH_MS, REFRESH_ROLE_IDS, FULL_LIBRARY_SCAN_MS, } from "./config.js";
 // ── Env ────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
@@ -21,6 +21,7 @@ let pollTimer = null;
 let pingMessageId = null;
 let modelList = [];
 let lastDiscoveryAt = 0;
+let lastFullScanAt = 0;
 // ── Discord Client ─────────────────────────────────────────────
 const client = new Client({
     intents: [
@@ -32,14 +33,36 @@ const client = new Client({
 });
 client.once("ready", async () => {
     console.log(`🐤 Canary is online as ${client.user?.tag}`);
+    await loadPersistedState();
     await refreshModelList();
+    await registerSlashCommands();
     scheduleDailyRefresh();
+    scheduleWeeklyFullScan();
     await runPoll();
 });
+// Register /refresh as a guild slash command (instant propagation, unlike global
+// commands which can take ~1h). We pull the guild from DISCORD_CHANNEL_ID rather
+// than registering globally so it's available immediately on every restart.
+async function registerSlashCommands() {
+    try {
+        const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
+        if (!channel || !("guild" in channel)) {
+            console.warn("⚠️  Could not resolve guild from DISCORD_CHANNEL_ID — slash commands not registered");
+            return;
+        }
+        const guild = channel.guild;
+        const refresh = new SlashCommandBuilder()
+            .setName("refresh")
+            .setDescription("Re-scrape the cloud catalog, wipe stuck backoff, and re-ping all models");
+        await guild.commands.set([refresh.toJSON()]);
+        console.log(`📡 Registered /refresh in guild ${guild.name} (${guild.id})`);
+    }
+    catch (err) {
+        console.error("Slash command registration failed:", err);
+    }
+}
 // Auto-refresh once per day at local midnight: re-scrape the catalog and wipe
-// per-model backoff so any "stuck down" ghosts get re-evaluated. Uses system
-// local time — set the TZ env var on Railway (e.g. "America/Los_Angeles") if
-// you want midnight in your timezone instead of UTC.
+// per-model backoff so any "stuck down" ghosts get re-evaluated.
 function scheduleDailyRefresh() {
     const now = new Date();
     const next = new Date(now);
@@ -62,6 +85,26 @@ function scheduleDailyRefresh() {
         }
     }, ms);
 }
+// Weekly full-library walk (~223 model pages). Catches every cloud-tagged model
+// without having to maintain EXTRA_CLOUD_TAGS by hand. Runs ~weekly via setTimeout
+// re-arming. First run happens FULL_LIBRARY_SCAN_MS after boot, not immediately.
+function scheduleWeeklyFullScan() {
+    setTimeout(async () => {
+        console.log("📚 Weekly full library scan starting");
+        try {
+            const tags = await refreshFullLibrary();
+            modelList = tags;
+            lastFullScanAt = Date.now();
+            console.log(`📚 Full scan done: ${tags.length} cloud tags`);
+        }
+        catch (err) {
+            console.error("Full library scan failed:", err);
+        }
+        finally {
+            scheduleWeeklyFullScan();
+        }
+    }, FULL_LIBRARY_SCAN_MS);
+}
 async function refreshModelList(force = false) {
     try {
         modelList = await getCloudModels(force);
@@ -74,10 +117,17 @@ async function refreshModelList(force = false) {
             throw err; // no fallback on first boot
     }
 }
+// Shared refresh routine called by both the @mention command and /refresh slash
+async function performFullRefresh() {
+    await refreshModelList(true);
+    resetBackoffState();
+    const result = await pollAllModels(modelList, OLLAMA_API_KEY, null);
+    lastResult = result;
+    return result;
+}
 // ── Poll Loop ──────────────────────────────────────────────────
 async function runPoll() {
     try {
-        // Refresh the catalog if the cache has aged out
         if (Date.now() - lastDiscoveryAt > DISCOVERY_REFRESH_MS) {
             await refreshModelList();
         }
@@ -112,13 +162,13 @@ async function runPoll() {
             const content = wentDown && DISCORD_PING_ON_RED ? "@here" : undefined;
             const posted = await channel.send({ content, embeds: [embed] });
             statusMessageId = posted.id;
-            console.log(`📌 Status message ID: ${statusMessageId} — set STATUS_MESSAGE_ID in Railway env to persist across restarts`);
+            console.log(`📌 Status message ID: ${statusMessageId} — set STATUS_MESSAGE_ID env to persist across restarts`);
         }
         else if (wentDown && DISCORD_PING_ON_RED) {
             const pingMsg = await channel.send("@here Ollama Cloud is down! 🔴");
             pingMessageId = pingMsg.id;
         }
-        console.log(`✅ Polled at ${result.checkedAt.toISOString()} — overall: ${result.overall} (${result.pingedCount}/${result.totalCount} pinged)`);
+        console.log(`✅ Polled at ${result.checkedAt.toISOString()} — overall: ${result.overall} (${result.pingedCount}/${result.totalCount} pinged, ${result.unreachableCount} unreachable)`);
     }
     catch (err) {
         console.error("Poll failed:", err);
@@ -131,7 +181,39 @@ async function runPoll() {
     pollTimer = setTimeout(runPoll, interval);
     console.log(`⏰ Next poll in ${interval / 60_000} min`);
 }
-// ── On-demand commands: @canary test | @canary refresh ─────────
+// ── Slash command handler ──────────────────────────────────────
+client.on("interactionCreate", async (interaction) => {
+    if (!interaction.isChatInputCommand())
+        return;
+    if (interaction.commandName !== "refresh")
+        return;
+    await handleRefreshSlash(interaction);
+});
+async function handleRefreshSlash(interaction) {
+    const member = interaction.member;
+    // Permission check: must be a full GuildMember (not partial) and hold one of the allowed roles
+    const allowed = member instanceof GuildMember &&
+        REFRESH_ROLE_IDS.some((id) => member.roles.cache.has(id));
+    if (!allowed) {
+        await interaction.reply({
+            content: "❌ You don't have permission to use /refresh.",
+            ephemeral: true,
+        });
+        return;
+    }
+    await interaction.deferReply();
+    try {
+        const result = await performFullRefresh();
+        await interaction.editReply({
+            content: `📋 Refreshed — ${modelList.length} tags, backoff cleared.`,
+            embeds: [buildEmbed(result)],
+        });
+    }
+    catch (err) {
+        await interaction.editReply("❌ Refresh failed: " + (err instanceof Error ? err.message : String(err)));
+    }
+}
+// ── Mention commands: @canary test | @canary refresh ───────────
 client.on("messageCreate", async (message) => {
     if (message.author.bot)
         return;
@@ -139,16 +221,12 @@ client.on("messageCreate", async (message) => {
         return;
     const content = message.content.toLowerCase();
     if (content.includes("refresh")) {
-        await message.reply("🔄 Refreshing — re-scraping catalog, clearing backoff, re-pinging all models...");
+        await message.reply("🔄 Refreshing — re-scraping catalog, clearing backoff, re-pinging...");
         try {
-            await refreshModelList(true);
-            resetBackoffState();
-            const result = await pollAllModels(modelList, OLLAMA_API_KEY, null);
-            lastResult = result;
-            const embed = buildEmbed(result);
+            const result = await performFullRefresh();
             await message.reply({
-                content: `📋 Refreshed — ${modelList.length} tags, all backoff state cleared.`,
-                embeds: [embed],
+                content: `📋 Refreshed — ${modelList.length} tags, backoff cleared.`,
+                embeds: [buildEmbed(result)],
             });
         }
         catch (err) {
@@ -161,8 +239,7 @@ client.on("messageCreate", async (message) => {
         try {
             const result = await pollAllModels(modelList, OLLAMA_API_KEY, lastResult?.downSince ?? null);
             lastResult = result;
-            const embed = buildEmbed(result);
-            await message.reply({ embeds: [embed] });
+            await message.reply({ embeds: [buildEmbed(result)] });
         }
         catch (err) {
             await message.reply("❌ Check failed: " + (err instanceof Error ? err.message : String(err)));
