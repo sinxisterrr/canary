@@ -3,14 +3,20 @@
 // Canary — Ollama Cloud Status Monitor
 // ---------------------------------------------------------------
 import { Client, GatewayIntentBits, Partials, SlashCommandBuilder, GuildMember, } from "discord.js";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import { pollAllModels, resetBackoffState, loadPersistedState, } from "./monitor.js";
 import { buildEmbed } from "./embed.js";
 import { getCloudModels, refreshFullLibrary } from "./discovery.js";
-import { POLL_INTERVAL_HEALTHY, POLL_INTERVAL_DEGRADED, POLL_INTERVAL_DOWN, DISCORD_PING_ON_RED, DISCOVERY_REFRESH_MS, REFRESH_ROLE_IDS, FULL_LIBRARY_SCAN_MS, } from "./config.js";
+import { POLL_INTERVAL_HEALTHY, POLL_INTERVAL_DEGRADED, POLL_INTERVAL_DOWN, DISCORD_PING_ON_RED, DISCOVERY_REFRESH_MS, REFRESH_ROLE_IDS, FULL_LIBRARY_SCAN_MS, REFRESH_TIMEZONE, } from "./config.js";
 // ── Env ────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 const OLLAMA_API_KEY = process.env.OLLAMA_API_KEY;
+// Where we persist the current status message ID. Survives restarts so we
+// don't post a new embed every redeploy and end up with Feb / Apr / today
+// duplicates floating in the channel.
+const STATUS_MSG_PATH = "cache/status_message.txt";
 let statusMessageId = process.env.STATUS_MESSAGE_ID ?? null;
 if (!DISCORD_TOKEN || !DISCORD_CHANNEL_ID || !OLLAMA_API_KEY) {
     throw new Error("Missing required env vars: DISCORD_TOKEN, DISCORD_CHANNEL_ID, OLLAMA_API_KEY");
@@ -34,15 +40,69 @@ const client = new Client({
 client.once("ready", async () => {
     console.log(`🐤 Canary is online as ${client.user?.tag}`);
     await loadPersistedState();
+    await loadStatusMessageId();
     await refreshModelList();
     await registerSlashCommands();
+    await reconcileStatusMessages();
     scheduleDailyRefresh();
     scheduleWeeklyFullScan();
     await runPoll();
 });
-// Register /refresh as a guild slash command (instant propagation, unlike global
-// commands which can take ~1h). We pull the guild from DISCORD_CHANNEL_ID rather
-// than registering globally so it's available immediately on every restart.
+// Persisted statusMessageId survives restarts. File takes precedence over
+// the env var — env is just bootstrap for the very first boot.
+async function loadStatusMessageId() {
+    try {
+        const raw = (await fs.readFile(STATUS_MSG_PATH, "utf8")).trim();
+        if (raw) {
+            statusMessageId = raw;
+            console.log(`💾 Loaded status message ID from disk: ${raw}`);
+        }
+    }
+    catch { /* no file yet — fine */ }
+}
+async function saveStatusMessageId() {
+    if (!statusMessageId)
+        return;
+    try {
+        await fs.mkdir(path.dirname(STATUS_MSG_PATH), { recursive: true });
+        await fs.writeFile(STATUS_MSG_PATH, statusMessageId, "utf8");
+    }
+    catch (err) {
+        console.warn("⚠️  Failed to persist status message ID:", err);
+    }
+}
+// One-time cleanup: scan recent channel history for OUR own "Ollama Cloud Status"
+// embeds, keep the newest as the canonical statusMessageId, delete the rest.
+// Solves the "Feb 23 / Apr 29 / today all sitting in channel" problem caused
+// by past redeploys losing the env-var-tracked ID.
+async function reconcileStatusMessages() {
+    try {
+        const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
+        if (!channel || !client.user)
+            return;
+        const messages = await channel.messages.fetch({ limit: 100 });
+        const ours = messages.filter((m) => m.author.id === client.user.id && m.embeds.some((e) => e.title === "☁️ Ollama Cloud Status"));
+        if (ours.size <= 1)
+            return;
+        // Newest first by createdTimestamp
+        const sorted = [...ours.values()].sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+        const keep = sorted[0];
+        const toDelete = sorted.slice(1);
+        statusMessageId = keep.id;
+        await saveStatusMessageId();
+        for (const m of toDelete) {
+            try {
+                await m.delete();
+            }
+            catch { /* ignore */ }
+        }
+        console.log(`🧹 Reconciled status messages: kept ${keep.id}, deleted ${toDelete.length} stale duplicates`);
+    }
+    catch (err) {
+        console.warn("Status reconciliation failed:", err);
+    }
+}
+// Register /refresh as a guild slash command (instant, vs ~1h for global).
 async function registerSlashCommands() {
     try {
         const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
@@ -61,16 +121,28 @@ async function registerSlashCommands() {
         console.error("Slash command registration failed:", err);
     }
 }
-// Auto-refresh once per day at local midnight: re-scrape the catalog and wipe
-// per-model backoff so any "stuck down" ghosts get re-evaluated.
-function scheduleDailyRefresh() {
+// ── Daily auto-refresh at midnight Mountain Time ──────────────
+// Hardcoded to America/Denver (handles DST automatically) so the schedule is
+// independent of whatever timezone the host machine uses.
+function msUntilNextMidnight(tz) {
     const now = new Date();
-    const next = new Date(now);
-    next.setHours(0, 0, 0, 0);
-    if (next <= now)
-        next.setDate(next.getDate() + 1);
-    const ms = next.getTime() - now.getTime();
-    console.log(`🌙 Next daily refresh in ${(ms / 3_600_000).toFixed(1)}h (${next.toString()})`);
+    const fmt = new Intl.DateTimeFormat("en-US", {
+        timeZone: tz,
+        hour: "2-digit", minute: "2-digit", second: "2-digit",
+        hour12: false,
+    });
+    const parts = fmt.formatToParts(now);
+    const part = (t) => parseInt(parts.find((p) => p.type === t).value, 10);
+    const h = part("hour") % 24;
+    const m = part("minute");
+    const s = part("second");
+    const elapsedToday = h * 3600 + m * 60 + s;
+    const remaining = 86400 - elapsedToday;
+    return remaining * 1000;
+}
+function scheduleDailyRefresh() {
+    const ms = msUntilNextMidnight(REFRESH_TIMEZONE);
+    console.log(`🌙 Next daily refresh in ${(ms / 3_600_000).toFixed(1)}h (midnight ${REFRESH_TIMEZONE})`);
     setTimeout(async () => {
         console.log("🌙 Daily refresh — re-scraping catalog and clearing backoff");
         try {
@@ -86,8 +158,7 @@ function scheduleDailyRefresh() {
     }, ms);
 }
 // Weekly full-library walk (~223 model pages). Catches every cloud-tagged model
-// without having to maintain EXTRA_CLOUD_TAGS by hand. Runs ~weekly via setTimeout
-// re-arming. First run happens FULL_LIBRARY_SCAN_MS after boot, not immediately.
+// without having to maintain EXTRA_CLOUD_TAGS by hand.
 function scheduleWeeklyFullScan() {
     setTimeout(async () => {
         console.log("📚 Weekly full library scan starting");
@@ -114,15 +185,36 @@ async function refreshModelList(force = false) {
     catch (err) {
         console.error("Discovery failed:", err);
         if (modelList.length === 0)
-            throw err; // no fallback on first boot
+            throw err;
     }
 }
-// Shared refresh routine called by both the @mention command and /refresh slash
-async function performFullRefresh() {
+// Edit the pinned status message in place. Posts a new one only if the old
+// one is missing (deleted, or first run). Used by both runPoll and refresh.
+async function postOrEditStatus(channel, embed, opts = {}) {
+    if (statusMessageId) {
+        try {
+            const existing = await channel.messages.fetch(statusMessageId);
+            await existing.edit({ embeds: [embed], ...(opts.clearContent ? { content: "" } : {}) });
+            return;
+        }
+        catch {
+            statusMessageId = null;
+        }
+    }
+    const posted = await channel.send({ content: opts.content, embeds: [embed] });
+    statusMessageId = posted.id;
+    await saveStatusMessageId();
+    console.log(`📌 Status message ID: ${statusMessageId} (persisted to ${STATUS_MSG_PATH})`);
+}
+// Shared refresh routine — reused by /refresh, @canary refresh, and daily auto.
+// Fetches a fresh poll AND edits the pinned status message in place so callers
+// don't post extra embeds.
+async function performFullRefresh(channel) {
     await refreshModelList(true);
     resetBackoffState();
     const result = await pollAllModels(modelList, OLLAMA_API_KEY, null);
     lastResult = result;
+    await postOrEditStatus(channel, buildEmbed(result));
     return result;
 }
 // ── Poll Loop ──────────────────────────────────────────────────
@@ -138,18 +230,9 @@ async function runPoll() {
         const previousOverall = lastResult?.overall ?? null;
         const result = await pollAllModels(modelList, OLLAMA_API_KEY, previousDownSince);
         lastResult = result;
-        const embed = buildEmbed(result);
         const wentDown = previousOverall !== null && previousOverall !== "down" && result.overall === "down";
         const wentClear = previousOverall === "down" && result.overall !== "down";
-        if (statusMessageId) {
-            try {
-                const existing = await channel.messages.fetch(statusMessageId);
-                await existing.edit({ embeds: [embed], ...(wentClear ? { content: "" } : {}) });
-            }
-            catch {
-                statusMessageId = null;
-            }
-        }
+        await postOrEditStatus(channel, buildEmbed(result), { clearContent: wentClear });
         if (wentClear && pingMessageId) {
             try {
                 const pingMsg = await channel.messages.fetch(pingMessageId);
@@ -158,13 +241,7 @@ async function runPoll() {
             catch { /* already deleted, ignore */ }
             pingMessageId = null;
         }
-        if (!statusMessageId) {
-            const content = wentDown && DISCORD_PING_ON_RED ? "@here" : undefined;
-            const posted = await channel.send({ content, embeds: [embed] });
-            statusMessageId = posted.id;
-            console.log(`📌 Status message ID: ${statusMessageId} — set STATUS_MESSAGE_ID env to persist across restarts`);
-        }
-        else if (wentDown && DISCORD_PING_ON_RED) {
+        if (wentDown && DISCORD_PING_ON_RED) {
             const pingMsg = await channel.send("@here Ollama Cloud is down! 🔴");
             pingMessageId = pingMsg.id;
         }
@@ -191,7 +268,6 @@ client.on("interactionCreate", async (interaction) => {
 });
 async function handleRefreshSlash(interaction) {
     const member = interaction.member;
-    // Permission check: must be a full GuildMember (not partial) and hold one of the allowed roles
     const allowed = member instanceof GuildMember &&
         REFRESH_ROLE_IDS.some((id) => member.roles.cache.has(id));
     if (!allowed) {
@@ -201,13 +277,13 @@ async function handleRefreshSlash(interaction) {
         });
         return;
     }
-    await interaction.deferReply();
+    // Ephemeral defer — only the user who ran the command sees the confirmation,
+    // which keeps the channel clean. The pinned status message updates for everyone.
+    await interaction.deferReply({ ephemeral: true });
     try {
-        const result = await performFullRefresh();
-        await interaction.editReply({
-            content: `📋 Refreshed — ${modelList.length} tags, backoff cleared.`,
-            embeds: [buildEmbed(result)],
-        });
+        const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
+        await performFullRefresh(channel);
+        await interaction.editReply(`✅ Refreshed — ${modelList.length} tags, backoff cleared. Updated the status message above.`);
     }
     catch (err) {
         await interaction.editReply("❌ Refresh failed: " + (err instanceof Error ? err.message : String(err)));
@@ -221,13 +297,10 @@ client.on("messageCreate", async (message) => {
         return;
     const content = message.content.toLowerCase();
     if (content.includes("refresh")) {
-        await message.reply("🔄 Refreshing — re-scraping catalog, clearing backoff, re-pinging...");
         try {
-            const result = await performFullRefresh();
-            await message.reply({
-                content: `📋 Refreshed — ${modelList.length} tags, backoff cleared.`,
-                embeds: [buildEmbed(result)],
-            });
+            const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
+            await performFullRefresh(channel);
+            await message.reply(`✅ Refreshed — ${modelList.length} tags, backoff cleared. Updated the status message.`);
         }
         catch (err) {
             await message.reply("❌ Refresh failed: " + (err instanceof Error ? err.message : String(err)));

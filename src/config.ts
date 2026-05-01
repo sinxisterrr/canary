@@ -100,3 +100,8 @@ export const FULL_LIBRARY_SCAN_MS = 7 * 24 * 60 * 60 * 1000; // weekly
 // Path for persisted runtime state (downSince, backoff counters) so a redeploy
 // doesn't reset every model to "down · just now".
 export const STATE_PATH = "cache/state.json";
+
+// Timezone the daily auto-refresh fires at midnight in. Hardcoded so it works
+// regardless of what TZ the host (Hetzner) is set to. IANA name. Handles DST
+// automatically via Intl. Change if the team migrates to a different zone.
+export const REFRESH_TIMEZONE = "America/Denver"; // MST/MDT
