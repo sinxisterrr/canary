@@ -84,6 +84,9 @@ export const WEEKLY_SCAN_DAY_OF_WEEK = 0;
 // Path for persisted runtime state (downSince, backoff counters) so a redeploy
 // doesn't reset every model to "down · just now".
 export const STATE_PATH = "cache/state.json";
+// Path for the weekly "what's new" delta — populated by Sunday's full library
+// scan, displayed in the embed footer area until next Sunday overwrites it.
+export const WEEKLY_DELTA_PATH = "cache/weekly_delta.json";
 // Timezone the daily auto-refresh fires at midnight in. Hardcoded so it works
 // regardless of what TZ the host (Hetzner) is set to. IANA name. Handles DST
 // automatically via Intl. Change if the team migrates to a different zone.

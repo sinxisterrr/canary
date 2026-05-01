@@ -6,7 +6,7 @@
 import fetch from "node-fetch";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { OLLAMA_BASE_URL, OLLAMA_CLOUD_SEARCH_URL, MODEL_CACHE_PATH, DISCOVERY_REFRESH_MS, EXTRA_CLOUD_TAGS, } from "./config.js";
+import { OLLAMA_BASE_URL, OLLAMA_CLOUD_SEARCH_URL, MODEL_CACHE_PATH, DISCOVERY_REFRESH_MS, EXTRA_CLOUD_TAGS, WEEKLY_DELTA_PATH, } from "./config.js";
 // Extract /library/<name> hrefs from the cloud search page
 function extractModelNames(html) {
     const names = new Set();
@@ -91,12 +91,36 @@ export async function discoverFullLibrary() {
 }
 // Same as getCloudModels but uses the full library scan as its source. Result
 // is cached normally — overwrites the same models.json the regular discovery uses.
+// Also computes the delta vs the previous cached list and persists "what's new
+// this week" so the embed can surface newly-discovered cloud models.
 export async function refreshFullLibrary() {
+    const previousCache = await readCache();
+    const previousTags = new Set(previousCache?.tags ?? []);
     const fullTags = await discoverFullLibrary();
     const allTags = [...new Set([...fullTags, ...EXTRA_CLOUD_TAGS])].sort();
     await writeCache(allTags);
-    console.log(`📚 Full-library refresh wrote ${allTags.length} tags to cache`);
-    return allTags;
+    const newTags = allTags.filter((t) => !previousTags.has(t));
+    await writeWeeklyDelta({ scanDate: new Date().toISOString(), newTags });
+    console.log(`📚 Full-library refresh wrote ${allTags.length} tags to cache (${newTags.length} new this week)`);
+    return { tags: allTags, newTags };
+}
+export async function readWeeklyDelta() {
+    try {
+        const raw = await fs.readFile(WEEKLY_DELTA_PATH, "utf8");
+        return JSON.parse(raw);
+    }
+    catch {
+        return null;
+    }
+}
+async function writeWeeklyDelta(delta) {
+    try {
+        await fs.mkdir(path.dirname(WEEKLY_DELTA_PATH), { recursive: true });
+        await fs.writeFile(WEEKLY_DELTA_PATH, JSON.stringify(delta, null, 2), "utf8");
+    }
+    catch (err) {
+        console.warn("⚠️  Failed to persist weekly delta:", err instanceof Error ? err.message : err);
+    }
 }
 async function readCache() {
     try {

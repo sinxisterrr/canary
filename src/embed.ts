@@ -84,7 +84,11 @@ function renderSection(
   return `**${title}**\n${lines}`;
 }
 
-export function buildEmbed(result: PollResult): EmbedBuilder {
+export interface BuildEmbedOptions {
+  newThisWeek?: string[]; // tags discovered by the most recent Sunday full scan
+}
+
+export function buildEmbed(result: PollResult, opts: BuildEmbedOptions = {}): EmbedBuilder {
   const { models, checkedAt, totalCount, pingedCount } = result;
   const { fastest, average, slowest, rateLimited, unreachable, down } = categorize(models);
 
@@ -97,7 +101,13 @@ export function buildEmbed(result: PollResult): EmbedBuilder {
     renderSection(`🟡 Rate Limited (${rateLimited.length})`, rateLimited, pad, "🟡", checkedAt),
     renderSection(`🌐 Unreachable (${unreachable.length})`, unreachable, pad, "🔵", checkedAt),
     renderSection(`🚩 Down (${down.length})`, down, pad, "🔴", checkedAt),
-  ].filter(Boolean);
+  ];
+
+  const newTags = opts.newThisWeek ?? [];
+  if (newTags.length > 0) {
+    const list = newTags.map((t) => `\`${t}\``).join(", ");
+    sections.push(`**🆕 Added this week (${newTags.length})**\n${list}`);
+  }
 
   const skipped = totalCount - pingedCount;
   const footerText =
@@ -107,7 +117,7 @@ export function buildEmbed(result: PollResult): EmbedBuilder {
 
   return new EmbedBuilder()
     .setTitle(`☁️ Ollama Cloud Status`)
-    .setDescription(sections.join("\n\n"))
+    .setDescription(sections.filter(Boolean).join("\n\n"))
     .setColor(pickSidebarColor(models))
     .setFooter({ text: footerText })
     .setTimestamp(checkedAt);

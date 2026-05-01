@@ -82,7 +82,7 @@ function renderSection(title, models, pad, dot, now) {
     const lines = models.map((m) => renderModelLine(m, pad, dot, now)).join("\n");
     return `**${title}**\n${lines}`;
 }
-export function buildEmbed(result) {
+export function buildEmbed(result, opts = {}) {
     const { models, checkedAt, totalCount, pingedCount } = result;
     const { fastest, average, slowest, rateLimited, unreachable, down } = categorize(models);
     const pad = columnWidth([...fastest, ...average, ...slowest, ...rateLimited, ...unreachable, ...down]);
@@ -93,14 +93,19 @@ export function buildEmbed(result) {
         renderSection(`🟡 Rate Limited (${rateLimited.length})`, rateLimited, pad, "🟡", checkedAt),
         renderSection(`🌐 Unreachable (${unreachable.length})`, unreachable, pad, "🔵", checkedAt),
         renderSection(`🚩 Down (${down.length})`, down, pad, "🔴", checkedAt),
-    ].filter(Boolean);
+    ];
+    const newTags = opts.newThisWeek ?? [];
+    if (newTags.length > 0) {
+        const list = newTags.map((t) => `\`${t}\``).join(", ");
+        sections.push(`**🆕 Added this week (${newTags.length})**\n${list}`);
+    }
     const skipped = totalCount - pingedCount;
     const footerText = skipped > 0
         ? `Monitoring ${totalCount} cloud models • ${pingedCount} pinged, ${skipped} in backoff • Last checked`
         : `Monitoring ${totalCount} cloud models • Last checked`;
     return new EmbedBuilder()
         .setTitle(`☁️ Ollama Cloud Status`)
-        .setDescription(sections.join("\n\n"))
+        .setDescription(sections.filter(Boolean).join("\n\n"))
         .setColor(pickSidebarColor(models))
         .setFooter({ text: footerText })
         .setTimestamp(checkedAt);

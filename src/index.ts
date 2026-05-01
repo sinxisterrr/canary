@@ -23,7 +23,7 @@ import {
   loadPersistedState,
 } from "./monitor.js";
 import { buildEmbed } from "./embed.js";
-import { getCloudModels, refreshFullLibrary } from "./discovery.js";
+import { getCloudModels, refreshFullLibrary, readWeeklyDelta } from "./discovery.js";
 import {
   POLL_INTERVAL_HEALTHY,
   POLL_INTERVAL_DEGRADED,
@@ -224,16 +224,23 @@ function scheduleWeeklyFullScan(): void {
   setTimeout(async () => {
     console.log("📚 Sunday-midnight full library scan starting");
     try {
-      const tags = await refreshFullLibrary();
+      const { tags, newTags } = await refreshFullLibrary();
       modelList = tags;
       lastFullScanAt = Date.now();
-      console.log(`📚 Full scan done: ${tags.length} cloud tags`);
+      console.log(`📚 Full scan done: ${tags.length} cloud tags (${newTags.length} new)`);
     } catch (err) {
       console.error("Full library scan failed:", err);
     } finally {
       scheduleWeeklyFullScan();
     }
   }, ms);
+}
+
+// Load the most recent Sunday-scan delta so the embed can surface "Added this
+// week" all week long. Returns [] if no scan has run yet or the file is missing.
+async function loadNewThisWeek(): Promise<string[]> {
+  const delta = await readWeeklyDelta();
+  return delta?.newTags ?? [];
 }
 
 async function refreshModelList(force = false): Promise<void> {
@@ -277,7 +284,8 @@ async function performFullRefresh(channel: TextChannel): Promise<PollResult> {
   resetBackoffState();
   const result = await pollAllModels(modelList, OLLAMA_API_KEY, null);
   lastResult = result;
-  await postOrEditStatus(channel, buildEmbed(result));
+  const newThisWeek = await loadNewThisWeek();
+  await postOrEditStatus(channel, buildEmbed(result, { newThisWeek }));
   return result;
 }
 
@@ -300,7 +308,8 @@ async function runPoll() {
     const wentDown = previousOverall !== null && previousOverall !== "down" && result.overall === "down";
     const wentClear = previousOverall === "down" && result.overall !== "down";
 
-    await postOrEditStatus(channel, buildEmbed(result), { clearContent: wentClear });
+    const newThisWeek = await loadNewThisWeek();
+    await postOrEditStatus(channel, buildEmbed(result, { newThisWeek }), { clearContent: wentClear });
 
     if (wentClear && pingMessageId) {
       try {
@@ -389,7 +398,8 @@ client.on("messageCreate", async (message) => {
     try {
       const result = await pollAllModels(modelList, OLLAMA_API_KEY, lastResult?.downSince ?? null);
       lastResult = result;
-      await message.reply({ embeds: [buildEmbed(result)] });
+      const newThisWeek = await loadNewThisWeek();
+      await message.reply({ embeds: [buildEmbed(result, { newThisWeek })] });
     } catch (err) {
       await message.reply("❌ Check failed: " + (err instanceof Error ? err.message : String(err)));
     }
