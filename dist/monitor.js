@@ -6,6 +6,12 @@
 import fetch from "node-fetch";
 import { OLLAMA_BASE_URL, DEGRADED_THRESHOLD_MS, REQUEST_TIMEOUT_MS, IGNORED_ERROR_CODES, PING_CONCURRENCY, BACKOFF_BASE_CYCLES, BACKOFF_MAX_CYCLES, } from "./config.js";
 const backoff = new Map();
+// Wipe all per-model backoff state. Use after a long outage so stale "down since
+// 23h ago" entries don't survive into the next poll — every model gets re-pinged
+// from scratch and its downSince/failure counters reset.
+export function resetBackoffState() {
+    backoff.clear();
+}
 function getState(model) {
     let s = backoff.get(model);
     if (!s) {

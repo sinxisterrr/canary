@@ -3,7 +3,7 @@
 // Canary — Ollama Cloud Status Monitor
 // ---------------------------------------------------------------
 import { Client, GatewayIntentBits, Partials, } from "discord.js";
-import { pollAllModels } from "./monitor.js";
+import { pollAllModels, resetBackoffState } from "./monitor.js";
 import { buildEmbed } from "./embed.js";
 import { getCloudModels } from "./discovery.js";
 import { POLL_INTERVAL_HEALTHY, POLL_INTERVAL_DEGRADED, POLL_INTERVAL_DOWN, DISCORD_PING_ON_RED, DISCOVERY_REFRESH_MS, } from "./config.js";
@@ -112,10 +112,17 @@ client.on("messageCreate", async (message) => {
         return;
     const content = message.content.toLowerCase();
     if (content.includes("refresh")) {
-        await message.reply("🔎 Re-scraping the Ollama cloud catalog...");
+        await message.reply("🔄 Refreshing — re-scraping catalog, clearing backoff, re-pinging all models...");
         try {
             await refreshModelList(true);
-            await message.reply(`📋 Model list refreshed — ${modelList.length} tags`);
+            resetBackoffState();
+            const result = await pollAllModels(modelList, OLLAMA_API_KEY, null);
+            lastResult = result;
+            const embed = buildEmbed(result);
+            await message.reply({
+                content: `📋 Refreshed — ${modelList.length} tags, all backoff state cleared.`,
+                embeds: [embed],
+            });
         }
         catch (err) {
             await message.reply("❌ Refresh failed: " + (err instanceof Error ? err.message : String(err)));

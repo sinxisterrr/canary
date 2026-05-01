@@ -45,6 +45,13 @@ interface BackoffState {
 }
 const backoff = new Map<string, BackoffState>();
 
+// Wipe all per-model backoff state. Use after a long outage so stale "down since
+// 23h ago" entries don't survive into the next poll — every model gets re-pinged
+// from scratch and its downSince/failure counters reset.
+export function resetBackoffState(): void {
+  backoff.clear();
+}
+
 function getState(model: string): BackoffState {
   let s = backoff.get(model);
   if (!s) {
