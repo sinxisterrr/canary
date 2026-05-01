@@ -91,11 +91,11 @@ export const NETWORK_ERROR_PATTERNS = [
   "ENETUNREACH",
 ];
 
-// How often to walk the full Ollama model library looking for cloud tags.
-// The default catalog page only shows ~20 featured models; a full walk catches
-// every cloud-tagged model in the ~223-model library so we don't have to
-// hand-maintain EXTRA_CLOUD_TAGS as Ollama adds or retires tags.
-export const FULL_LIBRARY_SCAN_MS = 7 * 24 * 60 * 60 * 1000; // weekly
+// Weekly full-library scan day-of-week. Pinned to Sunday so it lines up with
+// Ollama's weekly usage reset window — any new cloud models added during the
+// previous week get picked up at the same moment our quota resets.
+// 0 = Sunday, 1 = Monday, ..., 6 = Saturday (matches JS Date.getDay() ordering)
+export const WEEKLY_SCAN_DAY_OF_WEEK = 0;
 
 // Path for persisted runtime state (downSince, backoff counters) so a redeploy
 // doesn't reset every model to "down · just now".

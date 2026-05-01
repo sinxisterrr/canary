@@ -31,7 +31,7 @@ import {
   DISCORD_PING_ON_RED,
   DISCOVERY_REFRESH_MS,
   REFRESH_ROLE_IDS,
-  FULL_LIBRARY_SCAN_MS,
+  WEEKLY_SCAN_DAY_OF_WEEK,
   REFRESH_TIMEZONE,
 } from "./config.js";
 
@@ -192,11 +192,37 @@ function scheduleDailyRefresh(): void {
   }, ms);
 }
 
-// Weekly full-library walk (~223 model pages). Catches every cloud-tagged model
-// without having to maintain EXTRA_CLOUD_TAGS by hand.
+// Pinned to Sunday midnight Mountain Time (configurable via WEEKLY_SCAN_DAY_OF_WEEK)
+// to coincide with Ollama's weekly usage reset. Catches new cloud-tagged models
+// without us having to hand-maintain EXTRA_CLOUD_TAGS.
+function msUntilNextWeeklyScan(tz: string, targetDow: number): number {
+  const now = new Date();
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    weekday: "short",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(now);
+  const part = (t: string) => parts.find((p) => p.type === t)!.value;
+  const dayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const dow = dayMap[part("weekday")];
+  const h = parseInt(part("hour"), 10) % 24;
+  const m = parseInt(part("minute"), 10);
+  const s = parseInt(part("second"), 10);
+
+  let daysUntilTarget = (7 + targetDow - dow) % 7;
+  const elapsedToday = h * 3600 + m * 60 + s;
+  // If today IS the target day but midnight already passed, wait a full week
+  if (daysUntilTarget === 0 && elapsedToday > 0) daysUntilTarget = 7;
+  return (daysUntilTarget * 86400 - elapsedToday) * 1000;
+}
+
 function scheduleWeeklyFullScan(): void {
+  const ms = msUntilNextWeeklyScan(REFRESH_TIMEZONE, WEEKLY_SCAN_DAY_OF_WEEK);
+  console.log(`📚 Next full-library scan in ${(ms / 3_600_000).toFixed(1)}h (Sunday midnight ${REFRESH_TIMEZONE})`);
   setTimeout(async () => {
-    console.log("📚 Weekly full library scan starting");
+    console.log("📚 Sunday-midnight full library scan starting");
     try {
       const tags = await refreshFullLibrary();
       modelList = tags;
@@ -207,7 +233,7 @@ function scheduleWeeklyFullScan(): void {
     } finally {
       scheduleWeeklyFullScan();
     }
-  }, FULL_LIBRARY_SCAN_MS);
+  }, ms);
 }
 
 async function refreshModelList(force = false): Promise<void> {
