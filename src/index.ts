@@ -54,8 +54,33 @@ const client = new Client({
 client.once("ready", async () => {
   console.log(`🐤 Canary is online as ${client.user?.tag}`);
   await refreshModelList();
+  scheduleDailyRefresh();
   await runPoll();
 });
+
+// Auto-refresh once per day at local midnight: re-scrape the catalog and wipe
+// per-model backoff so any "stuck down" ghosts get re-evaluated. Uses system
+// local time — set the TZ env var on Railway (e.g. "America/Los_Angeles") if
+// you want midnight in your timezone instead of UTC.
+function scheduleDailyRefresh(): void {
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(0, 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  const ms = next.getTime() - now.getTime();
+  console.log(`🌙 Next daily refresh in ${(ms / 3_600_000).toFixed(1)}h (${next.toString()})`);
+  setTimeout(async () => {
+    console.log("🌙 Daily refresh — re-scraping catalog and clearing backoff");
+    try {
+      await refreshModelList(true);
+      resetBackoffState();
+    } catch (err) {
+      console.error("Daily refresh failed:", err);
+    } finally {
+      scheduleDailyRefresh();
+    }
+  }, ms);
+}
 
 async function refreshModelList(force = false): Promise<void> {
   try {
